@@ -97,6 +97,9 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
 .pct{font:700 17px Oswald}
 .pct.h{color:var(--home)}.pct.a{color:var(--away)}.pct{white-space:nowrap}
 .fav{outline:2px solid var(--amber);outline-offset:-2px;border-radius:4px}
+.flame{font:700 14px Oswald;padding:1px 8px;border-radius:12px;background:#3a2a10;color:var(--amber);white-space:nowrap}
+.flame.hot{background:var(--amber);color:#1a1300}
+.game.hot{border-color:var(--amber)}
 .final{color:var(--text);font-weight:700}
 .odds{color:var(--dim)}
 .calc h4{margin:8px 0 3px;font:600 13px "Barlow Semi Condensed";color:var(--dim)}
@@ -112,6 +115,7 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
     <select id="league"><option value="serie_1_English_Premier_League">Premier League</option></select>
     <label for="q" class="sr">Buscar equipo</label>
     <input type="search" id="q" placeholder="Buscar equipo" autocomplete="off">
+    <label class="chk" title="Muestra solo los partidos donde el local o la visita tiene más de 55% de probabilidad (1X2), ordenados de mayor a menor confianza"><input type="checkbox" id="hot"> 🔥 +55%</label>
     <button id="prev" class="nav" type="button" aria-label="Fecha anterior con partidos">◀</button>
     <label for="date" class="sr">Fecha</label>
     <input type="date" id="date">
@@ -124,6 +128,7 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
 <main id="games"></main>
 <footer>
   <p>Datos: AnnaBet.com (posiciones general, casa y fuera). El local se mide con su tabla general y su tabla en casa (LL); la visita con su tabla general y su tabla fuera (VV). GF = goles a favor por partido, GC = goles en contra por partido.</p>
+  <p>🔥 Confianza: probabilidad 1X2 del favorito (promedio entre General y LL/VV). Los partidos se ordenan de mayor a menor confianza; el filtro 🔥 +55% deja solo los que tienen un favorito con más de 55%.</p>
   <p>% ganador: ganados ÷ jugados. PPG: (ganados × 3 + empates × 1) ÷ jugados (de 0 a 3).</p>
   <p>1X2: Local = (ganados local + perdidos visita) ÷ partidos de ambos. Empate = (empates local + empates visita) ÷ partidos de ambos. Visita = (ganados visita + perdidos local) ÷ partidos de ambos.</p>
   <p>Goles: Cruzado → Local = (GF local + GC visita)/2, Visita = (GF visita + GC local)/2, Total = suma (igual a (GF L + GC L)/2 + (GF V + GC V)/2). Suma anotados → GF local + GF visita.</p>
@@ -214,6 +219,12 @@ function calc(Lg, Ls, Vg, Vs) {
       <tr><td>General</td><td>${f2(ppg(Lg))}</td><td>${f2(ppg(Vg))}</td><td>${ppg(Lg) != null && ppg(Vg) != null ? signed2(ppg(Lg) - ppg(Vg)) : "—"}</td></tr>
       <tr><td>LL / VV</td><td>${f2(ppg(Ls))}</td><td>${f2(ppg(Vs))}</td><td>${ppg(Ls) != null && ppg(Vs) != null ? signed2(ppg(Ls) - ppg(Vs)) : "—"}</td></tr>
     </table>
+    <h4>Promedio de goles por partido</h4>
+    <table><tr><th></th><th>GF local</th><th>GC local</th><th>GF visita</th><th>GC visita</th></tr>
+      <tr><td>General</td><td>${f2(Lg && Lg.gf)}</td><td>${f2(Lg && Lg.ga)}</td><td>${f2(Vg && Vg.gf)}</td><td>${f2(Vg && Vg.ga)}</td></tr>
+      <tr><td>LL / VV</td><td>${f2(Ls && Ls.gf)}</td><td>${f2(Ls && Ls.ga)}</td><td>${f2(Vs && Vs.gf)}</td><td>${f2(Vs && Vs.ga)}</td></tr>
+      <tr><td>Total partido</td><td colspan="2">${Lg && Lg.gf != null ? f2(Lg.gf + Lg.ga) : "—"} <span class="sub">(L gen.)</span></td><td colspan="2">${Vg && Vg.gf != null ? f2(Vg.gf + Vg.ga) : "—"} <span class="sub">(V gen.)</span></td></tr>
+    </table>
     <h4>Goles totales (over / under)</h4>
     <table><tr><th></th><th>General</th><th>LL / VV</th></tr>
       <tr><td>Goles local (GF L + GC V)/2</td>${two((t) => f2(t.hl))}</tr>
@@ -230,6 +241,14 @@ function calc(Lg, Ls, Vg, Vs) {
     </table>
   </div>`;
 }
+// Confianza 🔥: probabilidad 1X2 del favorito (promedio de General y LL/VV cuando hay ambos)
+function confidence(Lg, Ls, Vg, Vs) {
+  const xs = [x12(Lg, Vg), x12(Ls, Vs)].filter(Boolean);
+  if (!xs.length) return null;
+  const h = xs.reduce((a, x) => a + x.h, 0) / xs.length, a = xs.reduce((a2, x) => a2 + x.a, 0) / xs.length;
+  return h >= a ? { side: "Local", p: h } : { side: "Visita", p: a };
+}
+const HOT = 0.55;
 const signed2 = (d) => (d == null || !isFinite(d) ? "—" : (d > 0 ? "+" : "") + d.toFixed(2));
 
 // ---------- fechas ----------
@@ -253,14 +272,22 @@ function render() {
   const day = $("#date").value;
   const q = ($("#q").value || "").trim().toLowerCase();
   const all = (DATA.games || []).filter((g) => g.date === day);
-  const list = all.filter((g) => !q || (g.home + " " + g.away).toLowerCase().includes(q));
+  const onlyHot = $("#hot").checked;
+  const stOf = (g) => [S.all?.[g.homeKey], (S.home || S.all)?.[g.homeKey], S.all?.[g.awayKey], (S.away || S.all)?.[g.awayKey]];
+  for (const g of all) g._conf = confidence(...stOf(g));
+  // Los de mayor confianza primero
+  all.sort((a, b) => (b._conf?.p ?? -1) - (a._conf?.p ?? -1));
+  const list = all.filter((g) => (!q || (g.home + " " + g.away).toLowerCase().includes(q)) &&
+    (!onlyHot || (g._conf && g._conf.p > HOT)));
   const ds = gameDates();
   if (!all.length) {
     const next = ds.find((d) => d > day), prev = [...ds].reverse().find((d) => d < day);
     el.innerHTML = `<div class="empty">No hay partidos de ${esc(DATA.title)} el ${dayTitle(day)}.` +
       (next ? ` Próxima fecha con partidos: <b>${dayTitle(next)}</b> (usa ▶).` : prev ? ` Última fecha con partidos: <b>${dayTitle(prev)}</b> (usa ◀).` : " AnnaBet no muestra partidos para esta liga ahora.") + `</div>`;
   } else if (!list.length) {
-    el.innerHTML = `<div class="empty">Ningún partido coincide con la búsqueda.</div>`;
+    el.innerHTML = onlyHot
+      ? `<div class="empty">Ningún partido de este día tiene un favorito con más de 55%. Desmarca 🔥 +55% para ver todos.</div>`
+      : `<div class="empty">Ningún partido coincide con la búsqueda.</div>`;
   } else {
     el.innerHTML = `<h2 class="day">${esc(DATA.title)} · ${dayTitle(day)}</h2>` + list.map((g) => {
       const Lg = S.all?.[g.homeKey], Ls = (S.home || S.all)?.[g.homeKey];
@@ -268,8 +295,12 @@ function render() {
       const fin = g.score ? `<span class="final">Final ${g.score[0]}–${g.score[1]}</span>` : "";
       const hc = g.hc != null ? ` · HC ${g.hc > 0 ? "+" : ""}${g.hc}` : "";
       const odds = g.odds ? `<span class="odds" title="Cuotas 1 / X / 2 de AnnaBet">Cuotas ${g.odds.join(" · ")}${hc}</span>` : "";
-      return `<article class="game">
-        <div class="meta"><span>${esc(g.time || "Hora por confirmar")} ${fin}</span>${odds}</div>
+      const c = g._conf;
+      const hot = c && c.p > HOT;
+      const flame = c ? `<span class="flame${hot ? " hot" : ""}" title="Confianza: probabilidad 1X2 del favorito (promedio General y LL/VV)">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%</span>` : "";
+      return `<article class="game${hot ? " hot" : ""}">
+        <div class="meta"><span>${esc(g.time || "Hora por confirmar")} ${fin}</span>${flame}</div>
+        ${odds ? `<div class="meta">${odds}</div>` : ""}
         <div class="teams">${teamRow(g.home, "home", Lg)}${teamRow(g.away, "away", Vg)}</div>
         <div class="boxes">${box(g.home, "home", Lg, Ls)}${box(g.away, "away", Vg, Vs)}</div>
         ${calc(Lg, Ls, Vg, Vs)}
@@ -281,7 +312,7 @@ function render() {
   st.className = FROM_CACHE ? "warn" : "";
   st.textContent = FROM_CACHE
     ? `No se pudo conectar con AnnaBet. Mostrando datos guardados del ${when}.`
-    : `${list.length} partido(s) · ${dayTitle(day)}${hidden ? ` (${hidden} ocultos por la búsqueda)` : ""} · ${ds.length} fecha(s) con partidos en la liga · actualizado ${when}`;
+    : `${list.length} partido(s) · ${dayTitle(day)}${hidden ? ` (${hidden} ocultos por ${onlyHot ? "el filtro 🔥" : "la búsqueda"})` : ""} · ${ds.length} fecha(s) con partidos en la liga · actualizado ${when}`;
   const w = DATA.warnings || [];
   $("#warnbox").hidden = !w.length;
   $("#warnlist").innerHTML = w.map((x) => `<li>${esc(x)}</li>`).join("");
@@ -293,7 +324,9 @@ async function load(keepDate) {
   const my = ++reqId;
   const btn = $("#load");
   btn.disabled = true; btn.textContent = "Cargando…";
-  $("#status").className = ""; $("#status").textContent = "Leyendo AnnaBet…";
+  const lname = $("#league").selectedOptions[0]?.textContent || league;
+  $("#status").className = ""; $("#status").textContent = `Cargando ${lname} desde AnnaBet…`;
+  if (!keepDate) { $("#games").innerHTML = `<div class="empty">Cargando ${esc(lname)}…</div>`; $("#warnbox").hidden = true; }
   const cacheKey = "futbol-radar:" + league;
   try {
     const ctrl = new AbortController();
@@ -367,6 +400,7 @@ $("#date").addEventListener("change", () => DATA && render());
 $("#prev").addEventListener("click", () => shift(-1));
 $("#next").addEventListener("click", () => shift(1));
 $("#q").addEventListener("input", () => DATA && render());
+$("#hot").addEventListener("change", () => DATA && render());
 $("#date").value = isoOf(new Date());
 loadLeagues().then(() => load(false));
 </script>
