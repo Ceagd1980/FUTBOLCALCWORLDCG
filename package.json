@@ -1,0 +1,8 @@
+{
+  "name": "futbol-mundial-radar",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Radar de fútbol multiliga con datos de AnnaBet.com",
+  "engines": { "node": ">=18" }
+}
