@@ -36,7 +36,7 @@ function num(v) {
 }
 
 // ---------- descarga con reintento y límite de tiempo ----------
-async function getHtml(url, tries = 2, timeoutMs = 6000) {
+async function getHtml(url, tries = 2, timeoutMs = 4500) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
     const ctrl = new AbortController();
@@ -168,9 +168,29 @@ function parseStandings(html, tables) {
   // Por ORDEN: 1ª tabla = todos los juegos, 2ª = en casa, 3ª = fuera.
   // (Las pestañas "All games / At home / At away" se escriben todas antes de la 1ª tabla,
   //  así que el texto previo no sirve para saber cuál es cuál.)
-  const maps = st.map((t) => parseStandingsTable(t)).filter((m) => Object.keys(m).length);
+  // Solo cuentan tablas con varios equipos (descarta tablitas de resumen con 1 fila)
+  let maps = st.map((t) => parseStandingsTable(t)).filter((m) => Object.keys(m).length >= 3);
   const order = ["all", "home", "away"];
+  // Si la 1ª tabla tiene la mitad de partidos que la 2ª + 3ª, el orden es el esperado
   maps.slice(0, 3).forEach((m, i) => { out[order[i]] = m; });
+  // Tabla general armada desde casa + fuera (si la general no se pudo leer o está incompleta)
+  const derive = (H, A) => {
+    const all = {};
+    for (const k of new Set([...Object.keys(H), ...Object.keys(A)])) {
+      const h = H[k] || { gp: 0, w: 0, d: 0, l: 0 }, a = A[k] || { gp: 0, w: 0, d: 0, l: 0 };
+      const gp = h.gp + a.gp;
+      const tot = (x, f) => (x[f] != null ? x[f] * x.gp : 0);
+      all[k] = { team: (H[k] || A[k]).team, gp, w: h.w + a.w, d: h.d + a.d, l: h.l + a.l,
+        gf: gp ? (tot(h, "gf") + tot(a, "gf")) / gp : null, ga: gp ? (tot(h, "ga") + tot(a, "ga")) / gp : null };
+    }
+    Object.values(all).sort((x, y) => (y.w * 3 + y.d) - (x.w * 3 + x.d) || ((y.gf - y.ga) - (x.gf - x.ga)) || y.gf - x.gf)
+      .forEach((x, i) => { x.pos = i + 1; });
+    return all;
+  };
+  const size = (m) => (m ? Object.keys(m).length : 0);
+  // Caso: solo se leyeron casa y fuera (la general falló) → las 2 tablas son casa/fuera
+  if (maps.length === 2) { out.home = maps[0]; out.away = maps[1]; out.all = derive(out.home, out.away); out.derived = true; }
+  else if (out.home && out.away && size(out.all) < size(out.home)) { out.all = derive(out.home, out.away); out.derived = true; }
   // Coherencia: en casa + fuera no puede tener más partidos que la general; si pasa, se descartan
   if (out.all && out.home && out.away) {
     const bad = Object.keys(out.all).filter((k) => out.home[k] && out.away[k] && out.home[k].gp + out.away[k].gp > out.all[k].gp + 0.5).length;
@@ -193,6 +213,12 @@ function relDay(offset) {
   return iso(now.getUTCFullYear(), now.getUTCMonth() + 1, now.getUTCDate());
 }
 
+function nearest(d, mo) {
+  if (!(d >= 1 && d <= 31 && mo >= 1 && mo <= 12)) return null;
+  const now = new Date(), y = now.getUTCFullYear();
+  return [y - 1, y, y + 1].map((yy) => iso(yy, mo, d)).sort((a, b) => Math.abs(new Date(a) - now) - Math.abs(new Date(b) - now))[0];
+}
+
 function findDate(text) {
   const t = String(text || "");
   // AnnaBet puede escribir "Today" / "Hoy" en lugar de la fecha para los partidos del día
@@ -205,7 +231,16 @@ function findDate(text) {
   if (m && MONTHS[m[1].toLowerCase()]) return iso(+m[3], MONTHS[m[1].toLowerCase()], +m[2]);
   m = /\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b/.exec(t);
   if (m && +m[2] >= 1 && +m[2] <= 12) { let y = +m[3]; if (y < 100) y += 2000; return iso(y, +m[2], +m[1]); }
-  m = /(?:^|\s)(\d{1,2})\.(\d{1,2})\.(?:\s|$)/.exec(t);
+  // "26. September" / "26 Sep" sin año → el año más cercano a hoy
+  m = /\b(\d{1,2})\.?\s+([A-Za-zé]{3,10})\b/.exec(t);
+  if (m && MONTHS[m[2].toLowerCase()]) return nearest(+m[1], MONTHS[m[2].toLowerCase()]);
+  m = /\b([A-Za-z]{3,10})\.?\s+(\d{1,2})\b(?!\s*[:.]\d)/.exec(t);
+  if (m && MONTHS[m[1].toLowerCase()]) return nearest(+m[2], MONTHS[m[1].toLowerCase()]);
+  // "26/09" o "26/09/2026"
+  m = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/.exec(t);
+  if (m && +m[2] >= 1 && +m[2] <= 12 && +m[1] <= 31) { if (m[3]) { let y = +m[3]; if (y < 100) y += 2000; return iso(y, +m[2], +m[1]); } return nearest(+m[1], +m[2]); }
+  // "26.9." (con punto final; sin él se confundiría con cuotas como 2.10)
+  m = /(?:^|\s)(\d{1,2})\.(\d{1,2})\.(?=\s|$)/.exec(t);
   if (m && +m[2] >= 1 && +m[2] <= 12) {
     // sin año: el más cercano a hoy
     const now = new Date(), y = now.getUTCFullYear();
@@ -279,7 +314,8 @@ function parseLeagues(html) {
   const out = new Map();
   let m;
   while ((m = re.exec(html))) {
-    const id = m[1];
+    let id = decode(m[1]);
+    try { id = decodeURIComponent(id); } catch {}
     const txt = decode(m[4]) || m[3].replace(/_/g, " ");
     if (!out.has(id)) out.set(id, txt);
   }
@@ -292,7 +328,8 @@ const json = (body, status, extra = {}) =>
     headers: { "Content-Type": "application/json; charset=utf-8", ...extra },
   });
 
-const cleanLeague = (s) => (s && /^serie_\d+_[A-Za-z0-9._()-]+$/.test(s) ? s : null);
+// Acepta cualquier nombre de liga del menú (con acentos, &, etc.), sin barras ni saltos
+const cleanLeague = (s) => (s && /^serie_\d+_[^\/?#\s"<>]+$/.test(s) ? s : null);
 
 async function leaguesResponse() {
   try {
@@ -324,7 +361,7 @@ async function debugUpcoming() {
 }
 
 async function debugResponse(league) {
-  const u = `${SITE}${league}.html`;
+  const u = `${SITE}${encodeURI(league)}.html`;
   try {
     const r = await fetch(u, { headers: HEADERS });
     const html = await r.text();
@@ -357,15 +394,18 @@ async function debugResponse(league) {
 export default async (req) => {
   const url = new URL(req.url);
   if (url.searchParams.get("part") === "leagues") return leaguesResponse();
-  const league = cleanLeague(url.searchParams.get("league")) || "serie_1_English_Premier_League";
+  const askedLeague = url.searchParams.get("league");
+  const league = cleanLeague(askedLeague) || "serie_1_English_Premier_League";
+  if (askedLeague && !cleanLeague(askedLeague))
+    return json({ ok: false, error: `Nombre de liga no válido: ${askedLeague}`, league: askedLeague }, 400, { "Cache-Control": "no-store" });
   if (url.searchParams.get("debug")) return debugResponse(league);
 
   // La página de la liga y la portada de próximos partidos se piden a la vez
   const [leagueRes, upRes] = await Promise.allSettled([
-    getHtml(`${SITE}${league}.html`),
+    getHtml(`${SITE}${encodeURI(league)}.html`),
     (async () => {
       let err;
-      for (const u of UPCOMING_PAGES) { try { return await getHtml(u, 1, 6000); } catch (e) { err = e; } }
+      for (const u of UPCOMING_PAGES.slice(0, 1)) { try { return await getHtml(u, 1, 4500); } catch (e) { err = e; } }
       throw err || new Error("sin respuesta");
     })(),
   ]);
@@ -383,6 +423,7 @@ export default async (req) => {
   } catch (e) {
     return json({ ok: false, error: `La liga no tiene tabla de posiciones en AnnaBet (${e.message}).`, league }, 502, { "Cache-Control": "no-store" });
   }
+  if (standings.derived) warnings.push("La tabla general se calculó sumando las tablas de casa y fuera.");
   if (standings.mismatch) warnings.push("Las tablas de casa/fuera no cuadran con la general: se usa la general para todo.");
   else if (!standings.home || !standings.away) warnings.push("Esta liga no trae tablas de casa y fuera: se usa la general para todo.");
 
@@ -406,10 +447,11 @@ export default async (req) => {
       } else { games.push(g); upcomingCount++; }
     }
   } else upcomingErr = upcomingFail;
-  if (upcomingErr) warnings.push(`Próximos partidos (portada de AnnaBet): ${upcomingErr}`);
+  // Si la portada simplemente no trae tabla de próximos partidos no es un error: se usan los de la liga
+  if (upcomingErr && !/no trae tablas/.test(upcomingErr)) warnings.push(`Próximos partidos (portada de AnnaBet): ${upcomingErr}`);
   if (!games.length) warnings.push("No se encontraron partidos de esta liga (ni resultados ni próximos).");
   const noDate = games.filter((g) => !g.date).length;
-  if (noDate) warnings.push(`${noDate} partido(s) sin fecha reconocida (no se muestran).`);
+  if (noDate) warnings.push(`${noDate} partido(s) sin fecha reconocida (no se muestran). Ejemplo: ${games.filter((g) => !g.date).slice(0, 2).map((g) => `"${g.raw}"`).join(" / ")}`);
   for (let i = games.length - 1; i >= 0; i--) if (!games[i].date) games.splice(i, 1);
 
   const title = decode((/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html) || [])[1] || "") || league.replace(/^serie_\d+_/, "").replace(/_/g, " ");
