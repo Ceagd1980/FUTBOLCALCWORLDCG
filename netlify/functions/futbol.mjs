@@ -36,6 +36,38 @@ function num(v) {
 }
 
 // ---------- descarga con reintento y límite de tiempo ----------
+// Lee la página por partes y se detiene al llegar al tiempo límite: si AnnaBet es lento,
+// se trabaja con lo que alcanzó a llegar (las tablas de posiciones y partidos están arriba)
+// en lugar de fallar todo. Netlify corta las funciones a los 10 s.
+async function getHtmlPartial(url, maxMs = 8000) {
+  const ctrl = new AbortController();
+  const deadline = Date.now() + maxMs;
+  const timer = setTimeout(() => ctrl.abort(), maxMs + 500);
+  try {
+    const r = await fetch(url, { headers: HEADERS, signal: ctrl.signal, redirect: "follow" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.body || !r.body.getReader) return { html: await r.text(), partial: false };
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let html = "", partial = false;
+    for (;;) {
+      const left = deadline - Date.now();
+      if (left <= 0) { partial = true; break; }
+      const res = await Promise.race([reader.read(), sleep(left).then(() => ({ timeout: true }))]);
+      if (res.timeout) { partial = true; break; }
+      if (res.done) break;
+      html += dec.decode(res.value, { stream: true });
+    }
+    if (partial) { try { reader.cancel(); } catch {} }
+    if (!/<table/i.test(html)) throw new Error(partial ? "AnnaBet tardó demasiado en responder" : "la página no trae tablas (posible bloqueo o liga sin datos)");
+    return { html, partial };
+  } catch (e) {
+    throw e.name === "AbortError" ? new Error("AnnaBet tardó demasiado en responder") : e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getHtml(url, tries = 2, timeoutMs = 4500) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
@@ -401,21 +433,17 @@ export default async (req) => {
   if (url.searchParams.get("debug")) return debugResponse(league);
 
   // La página de la liga y la portada de próximos partidos se piden a la vez
-  const [leagueRes, upRes] = await Promise.allSettled([
-    getHtml(`${SITE}${encodeURI(league)}.html`),
-    (async () => {
-      let err;
-      for (const u of UPCOMING_PAGES.slice(0, 1)) { try { return await getHtml(u, 1, 4500); } catch (e) { err = e; } }
-      throw err || new Error("sin respuesta");
-    })(),
-  ]);
-  if (leagueRes.status !== "fulfilled")
-    return json({ ok: false, error: `No se pudo leer la liga en AnnaBet (${leagueRes.reason?.message}).`, league }, 502, { "Cache-Control": "no-store" });
-  const html = leagueRes.value;
-  const upcomingHtml = upRes.status === "fulfilled" ? upRes.value : null;
-  const upcomingFail = upRes.status === "fulfilled" ? null : upRes.reason?.message;
+  let html, partialPage = false;
+  try {
+    const r = await getHtmlPartial(`${SITE}${encodeURI(league)}.html`, 8000);
+    html = r.html; partialPage = r.partial;
+  } catch (e) {
+    return json({ ok: false, error: `No se pudo leer la liga en AnnaBet (${e.message}). Pulsa Actualizar para reintentar.`, league }, 502, { "Cache-Control": "no-store" });
+  }
+  const upcomingHtml = null, upcomingFail = null;
 
   const warnings = [];
+  if (partialPage) warnings.push("AnnaBet respondió lento: se usó la parte de la página que alcanzó a llegar (posiciones y partidos más recientes).");
   const tables = parseTables(html);
   let standings;
   try {
