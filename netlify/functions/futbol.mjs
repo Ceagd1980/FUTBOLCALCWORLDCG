@@ -203,8 +203,29 @@ function parseStandings(html, tables) {
   // Solo cuentan tablas con varios equipos (descarta tablitas de resumen con 1 fila)
   let maps = st.map((t) => parseStandingsTable(t)).filter((m) => Object.keys(m).length >= 3);
   const order = ["all", "home", "away"];
-  // Si la 1ª tabla tiene la mitad de partidos que la 2ª + 3ª, el orden es el esperado
-  maps.slice(0, 3).forEach((m, i) => { out[order[i]] = m; });
+  // Se eligen por PARTIDOS JUGADOS, no solo por orden: la general es la de más partidos y
+  // casa + fuera son el par de tablas cuyos partidos suman los de la general.
+  // (Algunas ligas traen antes otras tablas —forma, grupos, 1ª vuelta— y el orden falla.)
+  const medGp = (m) => { const a = Object.values(m).map((x) => x.gp).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : 0; };
+  const fits = (A, H, W) => {
+    const ks = Object.keys(A); let ok = 0;
+    for (const k of ks) if (H[k] && W[k] && Math.abs(H[k].gp + W[k].gp - A[k].gp) < 0.5) ok++;
+    return ok >= ks.length * 0.6;
+  };
+  let picked = null;
+  const cand = maps.slice(0, 8);
+  const byGp = cand.map((m, i) => i).sort((a, b) => medGp(cand[b]) - medGp(cand[a]) || a - b);
+  outer: for (const ai of byGp) for (let i = 0; i < cand.length; i++) for (let j = i + 1; j < cand.length; j++) {
+    if (i === ai || j === ai) continue;
+    if (fits(cand[ai], cand[i], cand[j])) { picked = [cand[ai], cand[i], cand[j]]; break outer; }
+  }
+  if (picked) { out.all = picked[0]; out.home = picked[1]; out.away = picked[2]; out.picked = true; }
+  else {
+    // ¿Hay un par casa/fuera sin general? (la general no se pudo leer)
+    maps.slice(0, 3).forEach((m, i) => { out[order[i]] = m; });
+    const big = byGp.length ? cand[byGp[0]] : null;
+    if (big && big !== out.all) out.all = big; // la de más partidos es la general
+  }
   // Tabla general armada desde casa + fuera (si la general no se pudo leer o está incompleta)
   const derive = (H, A) => {
     const all = {};
@@ -221,8 +242,8 @@ function parseStandings(html, tables) {
   };
   const size = (m) => (m ? Object.keys(m).length : 0);
   // Caso: solo se leyeron casa y fuera (la general falló) → las 2 tablas son casa/fuera
-  if (maps.length === 2) { out.home = maps[0]; out.away = maps[1]; out.all = derive(out.home, out.away); out.derived = true; }
-  else if (out.home && out.away && size(out.all) < size(out.home)) { out.all = derive(out.home, out.away); out.derived = true; }
+  if (!picked && maps.length === 2) { out.home = maps[0]; out.away = maps[1]; out.all = derive(out.home, out.away); out.derived = true; }
+  else if (!picked && out.home && out.away && size(out.all) < size(out.home)) { out.all = derive(out.home, out.away); out.derived = true; }
   // Coherencia: en casa + fuera no puede tener más partidos que la general; si pasa, se descartan
   if (out.all && out.home && out.away) {
     const bad = Object.keys(out.all).filter((k) => out.home[k] && out.away[k] && out.home[k].gp + out.away[k].gp > out.all[k].gp + 0.5).length;
@@ -288,12 +309,26 @@ function parseGames(tables, knownKeys, nameOf) {
   const games = [];
   const seen = new Set();
   let curDate = null;
+  const misses = [];
+  // Nombre parecido: "Siegen" ↔ "Sportfreunde Siegen", "SC Wiedenbrück" ↔ "Wiedenbrück"
+  // (una clave contiene a la otra, mínimo 5 letras, y un solo candidato)
+  const known = [...knownKeys];
+  const fuzzyCache = new Map();
+  const fuzzy = (k) => {
+    if (!k || k.length < 5 || /^\d+$/.test(k)) return null;
+    if (fuzzyCache.has(k)) return fuzzyCache.get(k);
+    const hits = known.filter((x) => x.length >= 5 && (x.includes(k) || k.includes(x)));
+    const res = hits.length === 1 ? hits[0] : null;
+    fuzzyCache.set(k, res);
+    return res;
+  };
   const teamIn = (cell) => {
     const k = tkey(cell);
     if (knownKeys.has(k)) return k;
-    // celda "Equipo A - Equipo B"
-    return null;
+    if (/\d{1,2}[:.]\d{2}|^\s*[\d\s.,:%+\-–/]*$/.test(cell) || cell.length > 45) return null; // horas, cuotas, marcadores
+    return fuzzy(k);
   };
+  const resolve = (s) => { const k = tkey(s); return knownKeys.has(k) ? k : fuzzy(k); };
   for (const t of tables) {
     curDate = null; // la fecha de un encabezado vale solo dentro de su tabla
     for (const r of t.rows) {
@@ -306,8 +341,15 @@ function parseGames(tables, knownKeys, nameOf) {
         if (k) teamsInRow.push(k);
         else if (/\s[-–]\s/.test(c)) {
           const parts = c.split(/\s[-–]\s/).map((p) => p.trim());
-          if (parts.length === 2 && knownKeys.has(tkey(parts[0])) && knownKeys.has(tkey(parts[1]))) teamsInRow.push(tkey(parts[0]), tkey(parts[1]));
+          const a = parts.length === 2 && resolve(parts[0]), b = parts.length === 2 && resolve(parts[1]);
+          if (a && b) teamsInRow.push(a, b);
         }
+      }
+      // Fila que parece partido (fecha/hora + textos) pero con equipos no reconocidos → se reporta
+      const intCells = r.filter((c) => /^\s*[+-]?\d+%?\s*$/.test(c)).length; // filas de tablas de posiciones
+      if (teamsInRow.length < 2 && intCells < 3 && (d || r.some((c) => /^\s*([01]?\d|2[0-3]):[0-5]\d\s*$/.test(c)))) {
+        const words = r.filter((c) => /[A-Za-zÀ-ÿ]{3}/.test(c) && !findDate(c) && c.length <= 45);
+        if (teamsInRow.length === 1 || words.length >= 2) misses.push(rowText.slice(0, 140));
       }
       if (d && teamsInRow.length < 2) { curDate = d; continue; }
       if (teamsInRow.length < 2) continue;
@@ -337,21 +379,81 @@ function parseGames(tables, knownKeys, nameOf) {
       });
     }
   }
+  games.misses = misses;
   return games;
 }
 
 // ---------- ligas ----------
+// País de cada liga: 1) el título de país del menú de AnnaBet ("Germany", "Soccer England"),
+// 2) si no, el gentilicio del enlace ("serie_253_German_Regionalliga_West" → Alemania).
+const COUNTRY_ES = {
+  england: "Inglaterra", scotland: "Escocia", wales: "Gales", "northern ireland": "Irlanda del Norte", ireland: "Irlanda",
+  germany: "Alemania", spain: "España", italy: "Italia", france: "Francia", netherlands: "Países Bajos", holland: "Países Bajos",
+  belgium: "Bélgica", portugal: "Portugal", turkey: "Turquía", "türkiye": "Turquía", greece: "Grecia", russia: "Rusia",
+  ukraine: "Ucrania", poland: "Polonia", "czech republic": "Rep. Checa", czechia: "Rep. Checa", slovakia: "Eslovaquia",
+  austria: "Austria", switzerland: "Suiza", denmark: "Dinamarca", sweden: "Suecia", norway: "Noruega", finland: "Finlandia",
+  iceland: "Islandia", croatia: "Croacia", serbia: "Serbia", slovenia: "Eslovenia", bosnia: "Bosnia", "bosnia and herzegovina": "Bosnia",
+  romania: "Rumania", bulgaria: "Bulgaria", hungary: "Hungría", cyprus: "Chipre", israel: "Israel", latvia: "Letonia",
+  lithuania: "Lituania", estonia: "Estonia", belarus: "Bielorrusia", albania: "Albania", montenegro: "Montenegro",
+  "north macedonia": "Macedonia del Norte", macedonia: "Macedonia del Norte", georgia: "Georgia", armenia: "Armenia",
+  azerbaijan: "Azerbaiyán", kazakhstan: "Kazajistán", moldova: "Moldavia", malta: "Malta", luxembourg: "Luxemburgo",
+  "faroe islands": "Islas Feroe", andorra: "Andorra", "san marino": "San Marino", gibraltar: "Gibraltar",
+  brazil: "Brasil", argentina: "Argentina", chile: "Chile", colombia: "Colombia", mexico: "México", uruguay: "Uruguay",
+  paraguay: "Paraguay", peru: "Perú", ecuador: "Ecuador", bolivia: "Bolivia", venezuela: "Venezuela", usa: "EE.UU.",
+  "united states": "EE.UU.", canada: "Canadá", "costa rica": "Costa Rica", honduras: "Honduras", guatemala: "Guatemala",
+  "el salvador": "El Salvador", panama: "Panamá", nicaragua: "Nicaragua", jamaica: "Jamaica",
+  japan: "Japón", "south korea": "Corea del Sur", korea: "Corea del Sur", china: "China", australia: "Australia",
+  "saudi arabia": "Arabia Saudita", qatar: "Catar", "united arab emirates": "Emiratos Árabes", uae: "Emiratos Árabes",
+  iran: "Irán", india: "India", thailand: "Tailandia", vietnam: "Vietnam", indonesia: "Indonesia", malaysia: "Malasia",
+  singapore: "Singapur", egypt: "Egipto", morocco: "Marruecos", algeria: "Argelia", tunisia: "Túnez",
+  "south africa": "Sudáfrica", nigeria: "Nigeria", ghana: "Ghana", "new zealand": "Nueva Zelanda",
+  europe: "Europa", international: "Internacional", world: "Mundial", "south america": "Sudamérica",
+};
+const DEMONYM_ES = {
+  english: "Inglaterra", scottish: "Escocia", welsh: "Gales", northern: "Irlanda del Norte", irish: "Irlanda",
+  german: "Alemania", spanish: "España", italian: "Italia", french: "Francia", dutch: "Países Bajos", belgian: "Bélgica",
+  portuguese: "Portugal", turkish: "Turquía", greek: "Grecia", russian: "Rusia", ukrainian: "Ucrania", polish: "Polonia",
+  czech: "Rep. Checa", slovak: "Eslovaquia", slovakian: "Eslovaquia", austrian: "Austria", swiss: "Suiza", danish: "Dinamarca",
+  swedish: "Suecia", norwegian: "Noruega", finnish: "Finlandia", icelandic: "Islandia", croatian: "Croacia", serbian: "Serbia",
+  slovenian: "Eslovenia", bosnian: "Bosnia", romanian: "Rumania", bulgarian: "Bulgaria", hungarian: "Hungría",
+  cypriot: "Chipre", cyprus: "Chipre", israeli: "Israel", latvian: "Letonia", lithuanian: "Lituania", estonian: "Estonia",
+  belarusian: "Bielorrusia", albanian: "Albania", montenegrin: "Montenegro", macedonian: "Macedonia del Norte",
+  georgian: "Georgia", armenian: "Armenia", azerbaijani: "Azerbaiyán", kazakh: "Kazajistán", moldovan: "Moldavia",
+  maltese: "Malta", luxembourg: "Luxemburgo", faroese: "Islas Feroe", brazilian: "Brasil", argentinian: "Argentina",
+  argentine: "Argentina", argentina: "Argentina", chilean: "Chile", colombian: "Colombia", mexican: "México",
+  uruguayan: "Uruguay", paraguayan: "Paraguay", peruvian: "Perú", ecuadorian: "Ecuador", bolivian: "Bolivia",
+  venezuelan: "Venezuela", american: "EE.UU.", us: "EE.UU.", usa: "EE.UU.", canadian: "Canadá", japanese: "Japón",
+  korean: "Corea del Sur", chinese: "China", australian: "Australia", saudi: "Arabia Saudita", qatari: "Catar",
+  egyptian: "Egipto", moroccan: "Marruecos", algerian: "Argelia", tunisian: "Túnez", "south": null,
+};
+function countryOfHeading(t) {
+  const k = String(t || "").replace(/^(soccer|football|basketball|ice hockey|hockey)\s+/i, "").trim().toLowerCase();
+  return COUNTRY_ES[k] || null;
+}
+function countryOfSlug(slug) {
+  const w = String(slug || "").split("_");
+  return DEMONYM_ES[(w[0] || "").toLowerCase()] || null;
+}
 function parseLeagues(html) {
   const re = /href="[^"]*?(serie_(\d+)_([^"\/]+?))\.html"[^>]*>([\s\S]*?)<\/a>/gi;
   const out = new Map();
-  let m;
+  let m, last = 0, heading = null;
   while ((m = re.exec(html))) {
+    // texto entre el enlace anterior y este = posible título de país del menú
+    const between = decode(html.slice(last, m.index).replace(/<a\b[\s\S]*?<\/a>/gi, " "));
+    last = m.index + m[0].length;
+    if (between) heading = between.length <= 40 && !/\d/.test(between) ? between : null;
+    if (/,/.test(m[1])) continue; // enlaces de temporadas anteriores
     let id = decode(m[1]);
     try { id = decodeURIComponent(id); } catch {}
     const txt = decode(m[4]) || m[3].replace(/_/g, " ");
-    if (!out.has(id)) out.set(id, txt);
+    const country = countryOfHeading(heading) || countryOfSlug(m[3]);
+    // "Alemania: Regionalliga West" (sin repetir el país si el nombre ya lo trae)
+    const label = country && !tkey(txt).includes(tkey(country)) ? `${country}: ${txt.replace(/^(English|German|Spanish|Italian|French|Finnish|Swedish|Norwegian|Danish|Dutch|Belgian|Portuguese|Turkish|Greek|Russian|Polish|Czech|Swiss|Austrian|Scottish|Irish|Brazilian|Argentinian|Mexican|American|Japanese|Korean|Chinese|Australian)\s+/i, "")}` : txt;
+    if (!out.has(id)) out.set(id, label);
   }
-  return [...out.entries()];
+  // Orden alfabético por país: en la lista se escribe "Ale…" y salta a Alemania
+  return [...out.entries()].sort((x, y) => x[1].localeCompare(y[1], "es"));
 }
 
 const json = (body, status, extra = {}) =>
@@ -413,7 +515,10 @@ async function debugResponse(league) {
           const nm = {}; for (const m of [stn.all, stn.home, stn.away]) for (const [k, v] of Object.entries(m || {})) nm[k] ||= v.team;
           const g = parseGames(tables, new Set(Object.keys(nm)), (k) => nm[k]);
           return { total: g.length, porFecha: g.reduce((a, x) => ((a[x.date || "SIN FECHA"] = (a[x.date || "SIN FECHA"] || 0) + 1), a), {}),
-            sinFecha: g.filter((x) => !x.date).slice(0, 8).map((x) => x.raw) };
+            sinFecha: g.filter((x) => !x.date).slice(0, 8).map((x) => x.raw),
+            equiposNoReconocidos: [...new Set(g.misses || [])].slice(0, 12),
+            tablasPosiciones: { general: Object.keys(stn.all || {}).length, casa: Object.keys(stn.home || {}).length, fuera: Object.keys(stn.away || {}).length, elegidasPorPartidos: !!stn.picked },
+            proximos: g.filter((x) => !x.score).slice(0, 10).map((x) => `${x.date} ${x.time} ${x.home} - ${x.away}`) };
         } catch (e) { return { error: e.message }; }
       })(),
       portadaProximos: await debugUpcoming(),
@@ -478,6 +583,8 @@ export default async (req) => {
   // Si la portada simplemente no trae tabla de próximos partidos no es un error: se usan los de la liga
   if (upcomingErr && !/no trae tablas/.test(upcomingErr)) warnings.push(`Próximos partidos (portada de AnnaBet): ${upcomingErr}`);
   if (!games.length) warnings.push("No se encontraron partidos de esta liga (ni resultados ni próximos).");
+  const misses = [...new Set(games.misses || [])];
+  if (misses.length) warnings.push(`${misses.length} fila(s) con fecha u hora cuyos equipos no están en la tabla de posiciones (no se muestran). Ejemplo: ${misses.slice(0, 3).map((x) => `"${x}"`).join(" / ")}`);
   const noDate = games.filter((g) => !g.date).length;
   if (noDate) warnings.push(`${noDate} partido(s) sin fecha reconocida (no se muestran). Ejemplo: ${games.filter((g) => !g.date).slice(0, 2).map((g) => `"${g.raw}"`).join(" / ")}`);
   for (let i = games.length - 1; i >= 0; i--) if (!games[i].date) games.splice(i, 1);
