@@ -44,7 +44,12 @@ async function getHtmlPartial(url, maxMs = 8000) {
   const deadline = Date.now() + maxMs;
   const timer = setTimeout(() => ctrl.abort(), maxMs + 500);
   try {
-    const r = await fetch(url, { headers: HEADERS, signal: ctrl.signal, redirect: "follow" });
+    // si AnnaBet corta la conexión ("fetch failed") se reintenta mientras quede tiempo
+    let r;
+    for (let k = 0; ; k++) {
+      try { r = await fetch(url, { headers: HEADERS, signal: ctrl.signal, redirect: "follow" }); break; }
+      catch (e) { if (e.name === "AbortError" || k >= 2 || deadline - Date.now() < 2500) throw e; await sleep(400); }
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     if (!r.body || !r.body.getReader) return { html: await r.text(), partial: false };
     const reader = r.body.getReader();
@@ -438,7 +443,7 @@ function countryOfSlug(slug) {
 }
 function parseLeagues(html) {
   // Solo enlaces <a> reales (no <link hreflang> de la cabecera), con texto corto
-  const re = /<a\b[^>]*?href="[^"]*?(serie_(\d+)_([^"\/]+?))\.html"[^>]*>((?:(?!<\/a>)[\s\S]){0,300}?)<\/a>/gi;
+  const re = /<a\b[^>]*?href="([^"]*?)(serie_(\d+)_([^"\/]+?))\.html"[^>]*>((?:(?!<\/a>)[\s\S]){0,300}?)<\/a>/gi;
   const out = new Map();
   let m, last = 0, heading = null;
   while ((m = re.exec(html))) {
@@ -447,12 +452,15 @@ function parseLeagues(html) {
     const between = decode(html.slice(last, aStart).replace(/<a\b[\s\S]*?<\/a>/gi, " "));
     last = m.index + m[0].length;
     if (between) heading = between.length <= 40 && !/\d/.test(between) ? between : null;
-    if (/,/.test(m[1])) continue; // enlaces de temporadas anteriores
-    let id = decode(m[1]);
+    if (/,/.test(m[2])) continue;
+    // selector de idioma: el mismo enlace en /es/, /fi/, /de/... → se ignora (solo /en/ o /us/)
+    const lang = (/\/([a-z]{2})\/[a-z]+stats\//i.exec(m[1]) || [])[1];
+    if (lang && !/^(en|us)$/i.test(lang)) continue; // enlaces de temporadas anteriores
+    let id = decode(m[2]);
     try { id = decodeURIComponent(id); } catch {}
-    let txt = decode(m[4]);
-    if (!txt || txt.length > 60 || /[#{};]/.test(txt)) txt = m[3].replace(/_/g, " ");
-    const country = countryOfHeading(heading) || countryOfSlug(m[3]);
+    let txt = decode(m[5]);
+    if (!txt || txt.length > 60 || /[#{};"<>]|^languages?\b|^(english|español|suomi|svenska|deutsch|français|italiano)$/i.test(txt)) txt = m[4].replace(/_/g, " ");
+    const country = countryOfHeading(heading) || countryOfSlug(m[4]);
     // "Alemania: Regionalliga West" (sin repetir el país si el nombre ya lo trae)
     const label = country && !tkey(txt).includes(tkey(country)) ? `${country}: ${txt.replace(/^(English|German|Spanish|Italian|French|Finnish|Swedish|Norwegian|Danish|Dutch|Belgian|Portuguese|Turkish|Greek|Russian|Polish|Czech|Swiss|Austrian|Scottish|Irish|Brazilian|Argentinian|Mexican|American|Japanese|Korean|Chinese|Australian)\s+/i, "")}` : txt;
     if (!out.has(id)) out.set(id, label);
@@ -502,8 +510,13 @@ async function debugUpcoming() {
 async function debugResponse(league) {
   const u = `${SITE}${encodeURI(league)}.html`;
   try {
-    const r = await fetch(u, { headers: HEADERS });
-    const html = await r.text();
+    // hasta 3 intentos: AnnaBet a veces corta la conexión ("fetch failed")
+    let r, html, lastErr;
+    for (let k = 0; k < 3 && !html; k++) {
+      try { r = await fetch(u, { headers: HEADERS }); html = await r.text(); }
+      catch (e) { lastErr = e; await sleep(700); }
+    }
+    if (!html) throw lastErr || new Error("sin respuesta");
     const tables = parseTables(html);
     return json({
       url: u, status: r.status, bytes: html.length, tablas: tables.length,
