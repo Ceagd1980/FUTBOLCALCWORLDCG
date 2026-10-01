@@ -51,7 +51,7 @@ async function getHtmlPartial(url, maxMs = 8000, extraHeaders = {}) {
       catch (e) { if (e.name === "AbortError" || k >= 2 || deadline - Date.now() < 2500) throw e; await sleep(400); }
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    if (!r.body || !r.body.getReader) return { html: await r.text(), partial: false };
+    if (!r.body || !r.body.getReader) return { html: await r.text(), partial: false, finalUrl: r.url, redirected: r.redirected };
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let html = "", partial = false;
@@ -65,7 +65,7 @@ async function getHtmlPartial(url, maxMs = 8000, extraHeaders = {}) {
     }
     if (partial) { try { reader.cancel(); } catch {} }
     if (!/<table/i.test(html)) throw new Error(partial ? "AnnaBet tardó demasiado en responder" : "la página no trae tablas (posible bloqueo o liga sin datos)");
-    return { html, partial };
+    return { html, partial, finalUrl: r.url, redirected: r.redirected };
   } catch (e) {
     throw e.name === "AbortError" ? new Error("AnnaBet tardó demasiado en responder") : e;
   } finally {
@@ -247,7 +247,13 @@ function parseStandings(html, tables) {
   };
   const size = (m) => (m ? Object.keys(m).length : 0);
   // Caso: solo se leyeron casa y fuera (la general falló) → las 2 tablas son casa/fuera
-  if (!picked && maps.length === 2) { out.home = maps[0]; out.away = maps[1]; out.all = derive(out.home, out.away); out.derived = true; }
+  // Dos tablas sin general: solo son casa/fuera si tienen más o menos los mismos partidos;
+  // si una tiene muchos más (general + forma), la grande es la general y no hay casa/fuera
+  if (!picked && maps.length === 2) {
+    const g0 = medGp(maps[0]), g1 = medGp(maps[1]);
+    if (Math.abs(g0 - g1) <= 1) { out.home = maps[0]; out.away = maps[1]; out.all = derive(out.home, out.away); out.derived = true; }
+    else { out.all = g0 >= g1 ? maps[0] : maps[1]; out.home = null; out.away = null; }
+  }
   else if (!picked && out.home && out.away && size(out.all) < size(out.home)) { out.all = derive(out.home, out.away); out.derived = true; }
   // Coherencia: en casa + fuera no puede tener más partidos que la general; si pasa, se descartan
   if (out.all && out.home && out.away) {
@@ -267,7 +273,7 @@ const iso = (y, m, d) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStar
 // Reconoce "Thursday 24. September 2026", "24. September 2026", "24.9.2026", "24.09.26", "24.9."
 // Fecha de hoy/mañana/ayer según la hora de Europa central (AnnaBet es un sitio europeo)
 function relDay(offset) {
-  const now = new Date(Date.now() + 2 * 3600 * 1000 + offset * 86400000); // ≈ hora de Europa (CEST)
+  const now = new Date(Date.now() + offset * 86400000); // AnnaBet escribe las fechas en hora UTC
   return iso(now.getUTCFullYear(), now.getUTCMonth() + 1, now.getUTCDate());
 }
 
@@ -352,7 +358,7 @@ function parseGames(tables, knownKeys, nameOf) {
       }
       // Fila que parece partido (fecha/hora + textos) pero con equipos no reconocidos → se reporta
       const intCells = r.filter((c) => /^\s*[+-]?\d+%?\s*$/.test(c)).length; // filas de tablas de posiciones
-      if (teamsInRow.length < 2 && intCells < 3 && !/odds:|season/i.test(rowText) && (d || r.some((c) => /^\s*([01]?\d|2[0-3]):[0-5]\d\s*$/.test(c)))) {
+      if (teamsInRow.length < 2 && intCells < 3 && !/odds:|cuotas:|season|relegation|promotion|playoff|%/i.test(rowText) && (d || r.some((c) => /^\s*([01]?\d|2[0-3]):[0-5]\d\s*$/.test(c)))) {
         const words = r.filter((c) => /[A-Za-zÀ-ÿ]{3}/.test(c) && !findDate(c) && c.length <= 45);
         if (teamsInRow.length === 1 || words.length >= 2) misses.push(rowText.slice(0, 140));
       }
@@ -368,7 +374,7 @@ function parseGames(tables, knownKeys, nameOf) {
         if (m) { score = m; break; }
       }
       const time = /\b([01]?\d|2[0-3]):([0-5]\d)\b/.exec(rowText);
-      const odds = r.map((c) => c.trim()).filter((c) => /^\d{1,2}\.\d{2}$/.test(c)).map(Number);
+      const odds = r.map((c) => c.trim()).filter((c) => /^\d{1,3}\.\d{2}$/.test(c)).map(Number);
       // Hándicap de la casa de apuestas (columna HC: "0", "+19.5", "-29.5")
       const hcCell = odds.length >= 2 ? r.map((c) => c.trim()).find((c) => /^([+-]\d{1,2}(\.\d{1,2})?|0)$/.test(c)) : null;
       const id = `${date}|${hk}|${ak}`;
@@ -470,6 +476,12 @@ function parseLeagues(html) {
   return [...out.entries()].sort((x, y) => x[1].localeCompare(y[1], "es"));
 }
 
+// Resumen corto de las tablas de la página (para los avisos): cabecera + 1ª fila de cada una
+function tableHeads(tables) {
+  return tables.filter((t) => t.rows.length >= 3).slice(0, 8)
+    .map((t, i) => `#${i + 1} (${t.rows.length} filas) ${t.rows.slice(0, 2).map((r) => r.join(" ").slice(0, 70)).join(" / ")}`).join(" ‖ ");
+}
+
 const json = (body, status, extra = {}) =>
   new Response(JSON.stringify(body), {
     status,
@@ -487,7 +499,7 @@ async function leaguesResponse() {
     return json({ ok: true, leagues: list, source: "annabet" }, 200, {
       "Cache-Control": "public, max-age=0, must-revalidate",
       "Netlify-CDN-Cache-Control": "public, durable, s-maxage=86400",
-      "Netlify-Vary": "query=part",
+      "Netlify-Vary": "query=part|league|path|debug",
     });
   } catch (e) {
     return json({ ok: true, leagues: FALLBACK_LEAGUES, source: "respaldo", warning: e.message }, 200, { "Cache-Control": "no-store" });
@@ -561,15 +573,20 @@ function upcomingCandidates(html, league) {
   const re = /["'(=\s]((?:https?:\/\/(?:www\.)?annabet\.com)?\/?[\w\/.\-]*?(?:upcoming|coming|next_?games?|fixtures?|schedule|program)[\w\/.\-]*(?:\.php|\.html|\/)?(?:\?[\w=&%.,\-]*)?)["')\s]/gi;
   let m;
   while ((m = re.exec(html))) {
-    let u = m[1].replace(/^https?:\/\/(?:www\.)?annabet\.com/i, "");
+    let u = m[1].replace(/&amp;/g, "&").replace(/^https?:\/\/(?:www\.)?annabet\.com/i, "");
     if (u.length < 6 || /\.(js|css|png|jpg|gif|svg)(\?|$)/i.test(u)) continue;
     if (!/\.(php|html?)\b|\?/i.test(u)) continue; // solo páginas reales (no nombres de pestañas)
     if (!u.startsWith("/")) u = new URL(u, SITE).pathname + (u.includes("?") ? u.slice(u.indexOf("?")) : "");
-    if (sid && /serie=|serie_|id=/.test(u) && !u.includes(sid)) continue; // de otra liga
+    // de otra liga: "serie=12" no es la liga 1 (también "serie=i%3A1%3B" = i:1;)
+    const dec = decodeURIComponent(u);
+    if (sid && /serie=|serie_|id=/.test(dec) && !new RegExp(`(serie[=_](?:i:)?|id=)${sid}(\\D|$)`).test(dec)) continue;
     found.add(u);
   }
   const base = new URL(SITE).pathname; // "/en/soccerstats/"
-  return [...found].slice(0, 4).concat([`${base}results_0.html`, `${base}results_1.html`]);
+  // La pestaña de AnnaBet (ajax_upcoming) es la fuente buena. La página del día (results_0) trae TODAS las
+  // ligas y podría mezclar copas o equipos femeninos/filiales: solo se usa si no hay pestaña.
+  const list = [...found].slice(0, 3);
+  return list.length ? list : [`${base}results_0.html`];
 }
 const cleanPath = (p) => (p && /^\/[\w\/.,?=&%\-]+$/.test(p) && !p.includes("..") ? p : null);
 
@@ -582,7 +599,7 @@ function genericRows(html, dayOffset) {
     let curDate = null, league = "";
     for (const r of t.rows) {
       const rowText = r.join(" | ");
-      if (/odds:|season|average|total|%/i.test(rowText) && !/\b\d{1,2}:\d{2}\b/.test(rowText)) continue;
+      if (/odds:|cuotas:|season|relegation|promotion|average|total|%/i.test(rowText) && !/\b\d{1,2}:\d{2}\b/.test(rowText)) continue;
       const d = findDate(rowText);
       const time = r.map((c) => /(?:^|\D)(([01]?\d|2[0-3]):[0-5]\d)(?!\d)/.exec(c)).find(Boolean);
       // "04.10. 13:30" / "Sat 04.10 13:30" (día.mes junto a la hora)
@@ -603,7 +620,7 @@ function genericRows(html, dayOffset) {
         else if (texts.length === 1 && !time && !score) league = texts[0];
         continue;
       }
-      let odds = r.map((c) => c.trim()).filter((c) => /^\d{1,2}\.\d{2}$/.test(c)).map(Number);
+      let odds = r.map((c) => c.trim()).filter((c) => /^\d{1,3}\.\d{2}$/.test(c)).map(Number);
       if (odds.length < 2) {
         const oc = r.find((c) => /^\s*\d{1,2}\.\d{2}(\s*[\/|]\s*\d{1,2}\.\d{2}){1,2}\s*$/.test(c));
         odds = oc ? oc.split(/[\/|]/).map((x) => Number(x.trim())) : [];
@@ -626,16 +643,23 @@ async function rowsResponse(path) {
   try {
     // las direcciones ajax_ de AnnaBet se piden como lo hace su página (jQuery .load)
     const ajax = /ajax_/i.test(p) ? { "X-Requested-With": "XMLHttpRequest", Referer: SITE, Accept: "text/html, */*; q=0.01" } : {};
-    const r = await getHtmlPartial(ORIGIN + p, 8500, ajax);
+    // igual que la página de AnnaBet: dirección + "&" + número al azar (evita respuestas viejas)
+    const r = await getHtmlPartial(ORIGIN + p + (/ajax_/i.test(p) ? `&${Math.random()}` : ""), 8500, ajax);
+    // si AnnaBet nos manda a otra página (portada, aviso de límite), esas filas no son de la liga
+    const fin = r.finalUrl ? new URL(r.finalUrl).pathname : "";
+    if (r.redirected && fin && !p.startsWith(fin))
+      return json({ ok: false, path: p, error: `AnnaBet redirigió a ${fin} (posible límite de visitas, reintenta en unos minutos)`, rows: [] }, 200, { "Cache-Control": "no-store" });
     const rows = genericRows(r.html, off ? +off[1] : null);
     // sin filas reconocidas: se devuelve una muestra de cómo viene la página para corregir el lector
     const sample = rows.length ? undefined : parseTables(r.html).filter((t) => t.rows.length > 1).slice(0, 2)
       .map((t) => t.rows.slice(0, 5).map((x) => x.join(" | ").slice(0, 160)));
-    return json({ ok: true, path: p, rows, partial: r.partial, bytes: r.html.length, sample }, 200, {
+    // incompleto o vacío: no se guarda en la caché (que el próximo intento vuelva a pedirlo)
+    const hdr = r.partial || !rows.length ? { "Cache-Control": "no-store" } : {
       "Cache-Control": "public, max-age=0, must-revalidate",
       "Netlify-CDN-Cache-Control": "public, durable, s-maxage=600, stale-while-revalidate=1800",
-      "Netlify-Vary": "query=part|path",
-    });
+      "Netlify-Vary": "query=part|path|league|debug",
+    };
+    return json({ ok: true, path: p, rows, partial: r.partial, bytes: r.html.length, sample }, 200, hdr);
   } catch (e) {
     return json({ ok: false, path: p, error: e.message, rows: [] }, 200, { "Cache-Control": "no-store" });
   }
@@ -686,10 +710,10 @@ export default async (req) => {
   try {
     standings = parseStandings(html, tables);
   } catch (e) {
-    return json({ ok: false, error: `La liga no tiene tabla de posiciones en AnnaBet (${e.message}).`, league }, 502, { "Cache-Control": "no-store" });
+    return json({ ok: false, error: `La liga no tiene tabla de posiciones en AnnaBet (${e.message}). Tablas vistas: ${tableHeads(tables)}`, league }, 502, { "Cache-Control": "no-store" });
   }
   if (standings.derived) warnings.push("La tabla general se calculó sumando las tablas de casa y fuera.");
-  if (standings.mismatch) warnings.push("Las tablas de casa/fuera no cuadran con la general: se usa la general para todo.");
+  if (standings.mismatch) warnings.push(`Las tablas de casa/fuera no cuadran con la general: se usa la general para todo. Tablas vistas: ${tableHeads(tables)}`);
   else if (!standings.home || !standings.away) warnings.push("Esta liga no trae tablas de casa y fuera: se usa la general para todo.");
 
   const names = {};
@@ -726,10 +750,10 @@ export default async (req) => {
   return json(
     { ok: true, league, title, updated: new Date().toISOString(), standings, games, warnings, upcomingUrls: upcomingCandidates(html, league), upcomingProbe: probeUpcoming(html) },
     200,
-    {
+    partialPage || !games.length ? { "Cache-Control": "no-store" } : {
       "Cache-Control": "public, max-age=0, must-revalidate",
-      "Netlify-CDN-Cache-Control": "public, durable, s-maxage=900, stale-while-revalidate=3600",
-      "Netlify-Vary": "query=league",
+      "Netlify-CDN-Cache-Control": "public, durable, s-maxage=900, stale-while-revalidate=1800",
+      "Netlify-Vary": "query=league|part|path|debug",
     }
   );
 };
