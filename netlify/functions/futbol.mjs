@@ -460,9 +460,10 @@ function parseLeagues(html) {
     try { id = decodeURIComponent(id); } catch {}
     let txt = decode(m[5]);
     if (!txt || txt.length > 60 || /[#{};"<>]|^languages?\b|^(english|español|suomi|svenska|deutsch|français|italiano)$/i.test(txt)) txt = m[4].replace(/_/g, " ");
-    const country = countryOfHeading(heading) || countryOfSlug(m[4]);
+    // país: título del menú → gentilicio del enlace → gentilicio o país al inicio del nombre ("Brazilian Serie B")
+    const country = countryOfHeading(heading) || countryOfSlug(m[4]) || countryOfSlug(txt.replace(/\s+/g, "_")) || countryOfHeading(txt.split(/\s+/)[0]);
     // "Alemania: Regionalliga West" (sin repetir el país si el nombre ya lo trae)
-    const label = country && !tkey(txt).includes(tkey(country)) ? `${country}: ${txt.replace(/^(English|German|Spanish|Italian|French|Finnish|Swedish|Norwegian|Danish|Dutch|Belgian|Portuguese|Turkish|Greek|Russian|Polish|Czech|Swiss|Austrian|Scottish|Irish|Brazilian|Argentinian|Mexican|American|Japanese|Korean|Chinese|Australian)\s+/i, "")}` : txt;
+    const label = country && !tkey(txt).includes(tkey(country)) ? `${country}: ${txt.replace(/^(English|German|Spanish|Italian|French|Finnish|Swedish|Norwegian|Danish|Dutch|Belgian|Portuguese|Turkish|Greek|Russian|Polish|Czech|Swiss|Austrian|Scottish|Irish|Brazilian|Argentinian|Mexican|American|Japanese|Korean|Chinese|Australian|Colombian|Chilean|Peruvian|Ecuadorian|Uruguayan|Paraguayan|Bolivian|Venezuelan|Ukrainian|Romanian|Bulgarian|Hungarian|Croatian|Serbian|Slovenian|Slovak|Israeli|Cypriot|Icelandic|Welsh|Argentine|Belarusian|Latvian|Lithuanian|Estonian|Egyptian|Moroccan|Saudi|Canadian)\s+/i, "")}` : txt;
     if (!out.has(id)) out.set(id, label);
   }
   // Orden alfabético por país: en la lista se escribe "Ale…" y salta a Alemania
