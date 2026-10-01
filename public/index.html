@@ -368,8 +368,10 @@ async function loadUpcoming(my) {
   if (!future) {
     const pr = DATA.upcomingProbe || {};
     const info = res.map((r, i) => `${urls[i].replace(/^.*\//, "")}: ${r.status === "fulfilled" && r.value ? (r.value.ok ? (r.value.rows || []).length + " filas" : "error " + (r.value.error || "")) : "sin respuesta"}`).join(" · ");
-    const hints = [...(pr.ids || []).slice(0, 3), ...(pr.snippets || []).slice(0, 3), ...(pr.scripts || []).slice(0, 4)].map((x) => String(x).slice(0, 160)).join(" ‖ ");
-    (DATA.warnings ||= []).push(`Próximos partidos: AnnaBet no mostró partidos por jugar de esta liga. Fuentes: ${info}.${hints ? " Pistas de la pestaña Upcoming: " + hints : ""}`);
+    const hints = [pr.ajax ? String(pr.ajax).slice(0, 500) : null, ...(pr.ajax ? [] : [...(pr.ids || []).slice(0, 3), ...(pr.snippets || []).slice(0, 3)].map((x) => String(x).slice(0, 160)))].filter(Boolean).join(" ‖ ");
+    const samples = res.map((r, i) => r.status === "fulfilled" && r.value && r.value.sample && r.value.sample.length
+      ? `${urls[i].replace(/^.*\//, "").slice(0, 40)} (${r.value.bytes} bytes) → ${r.value.sample.flat().slice(0, 6).join(" ¦ ")}` : null).filter(Boolean).join(" ‖ ");
+    (DATA.warnings ||= []).push(`Próximos partidos: AnnaBet no mostró partidos por jugar de esta liga. Fuentes: ${info}.${hints ? " Pistas: " + hints : ""}${samples ? " Muestra: " + samples : ""}`);
   }
   if (added && AUTO_DATE) $("#date").value = pickDefaultDate();
   render();
