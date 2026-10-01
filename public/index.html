@@ -101,6 +101,7 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
 .flame.hot{background:var(--amber);color:#1a1300}
 .game.hot{border-color:var(--amber)}
 .final{color:var(--text);font-weight:700}
+.night{color:#9fb6ff}
 .odds{color:var(--dim)}
 .calc h4{margin:8px 0 3px;font:600 13px "Barlow Semi Condensed";color:var(--dim)}
 .calc h4:first-child{margin-top:0}
@@ -116,6 +117,7 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
     <label for="q" class="sr">Buscar equipo</label>
     <input type="search" id="q" placeholder="Buscar equipo" autocomplete="off">
     <label class="chk" title="Muestra solo los partidos donde el local o la visita tiene más de 55% de probabilidad (1X2), ordenados de mayor a menor confianza"><input type="checkbox" id="hot"> 🔥 +55%</label>
+    <label class="chk" title="AnnaBet pone las fechas en hora UTC (5 horas más que Ecuador): los partidos desde las 7 p. m. de Ecuador salen con la fecha del día siguiente. Marca esta casilla para ver también esos partidos en el día elegido."><input type="checkbox" id="night"> 🌙 + noche</label>
     <button id="prev" class="nav" type="button" aria-label="Fecha anterior con partidos">◀</button>
     <label for="date" class="sr">Fecha</label>
     <input type="date" id="date" autocomplete="off">
@@ -257,6 +259,8 @@ function pickDefaultDate() {
   const ds = gameDates(), today = isoOf(new Date());
   if (!ds.length) return today;
   if (ds.includes(today)) return today;
+  // 🌙: si AnnaBet pone partidos mañana (UTC), pueden ser esta noche: se abre hoy
+  if ($("#night").checked) { const t = new Date(); const tm = isoOf(new Date(t.getFullYear(), t.getMonth(), t.getDate() + 1)); if (ds.includes(tm)) return today; }
   return ds.find((d) => d > today) || ds[ds.length - 1];
 }
 function shift(dir) {
@@ -271,7 +275,10 @@ function render() {
   const S = DATA.standings || {};
   const day = $("#date").value;
   const q = ($("#q").value || "").trim().toLowerCase();
-  const all = (DATA.games || []).filter((g) => g.date === day);
+  // 🌙: también los partidos que AnnaBet pone al día siguiente (pueden ser esta noche en Ecuador)
+  const nextDay = (() => { const [y, m, d] = day.split("-").map(Number); return isoOf(new Date(y, m - 1, d + 1)); })();
+  const withNight = $("#night").checked;
+  const all = (DATA.games || []).filter((g) => g.date === day || (withNight && g.date === nextDay && !g.score));
   const onlyHot = $("#hot").checked;
   const stOf = (g) => [S.all?.[g.homeKey], (S.home || S.all)?.[g.homeKey], S.all?.[g.awayKey], (S.away || S.all)?.[g.awayKey]];
   for (const g of all) g._conf = confidence(...stOf(g));
@@ -298,9 +305,11 @@ function render() {
       const c = g._conf;
       const hot = c && c.p > HOT;
       const flame = c ? `<span class="flame${hot ? " hot" : ""}" title="Confianza: probabilidad 1X2 del favorito (promedio General y LL/VV)">🔥 ${c.side} ${(c.p * 100).toFixed(0)}%</span>` : "";
+      const nightNote = g.date !== day ? `<div class="meta night">🌙 AnnaBet lo pone el ${dayTitle(g.date)} (hora UTC): si es de noche, en Ecuador se juega el ${dayTitle(day)}</div>` : "";
       return `<article class="game${hot ? " hot" : ""}">
-        <div class="meta"><span>${esc(g.time || "Hora por confirmar")} ${fin}</span>${flame}</div>
+        <div class="meta"><span>${esc(g.time || (g.score ? "" : "Sin hora (AnnaBet solo da la fecha)"))} ${fin}</span>${flame}</div>
         ${odds ? `<div class="meta">${odds}</div>` : ""}
+        ${nightNote}
         <div class="teams">${teamRow(g.home, "home", Lg)}${teamRow(g.away, "away", Vg)}</div>
         <div class="boxes">${box(g.home, "home", Lg, Ls)}${box(g.away, "away", Vg, Vs)}</div>
         ${calc(Lg, Ls, Vg, Vs)}
@@ -321,19 +330,32 @@ function render() {
 const LSKEY = "futbol-radar:league";
 const API = "/api/futbol";
 // ---------- partidos próximos (pestaña "Upcoming Games" y página del día de AnnaBet) ----------
-let AUTO_DATE = true; // la fecha se elige sola hasta que el usuario la cambie
+let AUTO_DATE = true;
+let NIGHT_SET = false;
+// Ligas de América: la casilla 🌙 se marca sola (salvo que la hayas cambiado tú)
+const AMERICAS = /brazil|brasil|colombia|argentin|mexic|major league soccer|\bmls\b|\busl\b|chile|peru|ecuador|urugua|paragua|bolivia|venezuel|canad|costa rica|hondur|guatemal|salvador|panam|nicaragu|jamaica|liga mx|libertadores|sudamericana|concacaf/i;
+function autoNight() {
+  const saved = LS.get("futbol-radar:night");
+  if (saved != null) { $("#night").checked = saved === "1" && AMERICAS.test(`${DATA?.title} ${DATA?.league}`); return; }
+  $("#night").checked = AMERICAS.test(`${DATA?.title} ${DATA?.league}`);
+} // la fecha se elige sola hasta que el usuario la cambie
 const tkc = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
 function teamIndex() {
   const S = DATA.standings || {}, names = {};
   for (const m of [S.all, S.home, S.away]) for (const [k, v] of Object.entries(m || {})) names[k] ||= v.team;
   const keys = Object.keys(names);
-  const keyOf = (name) => {
+  const keyOf = (name, exactOnly) => {
     const k = tkc(name);
     if (!k) return null;
     if (names[k]) return k;
+    if (exactOnly) return null;
     if (k.length < 5) return null;
     const hits = keys.filter((x) => x.length >= 5 && (x.includes(k) || k.includes(x)));
-    return hits.length === 1 ? hits[0] : null;
+    if (hits.length !== 1) return null;
+    // "Oberhausen W", "Dortmund U19", "Bonner SC II" son otros equipos (femenino, juvenil, filial)
+    const extra = (k.length > hits[0].length ? k.replace(hits[0], "") : hits[0].replace(k, ""));
+    if (/^(w|women|femenino|ii|iii|b|u\d{2}|res|reserves|youth)$/.test(extra)) return null;
+    return hits[0];
   };
   return { keyOf, nameOf: (k) => names[k] };
 }
@@ -346,14 +368,18 @@ async function loadUpcoming(my) {
   const { keyOf, nameOf } = teamIndex();
   const idx = new Map(DATA.games.map((g) => [`${g.date}|${g.homeKey}|${g.awayKey}`, g]));
   let added = 0, read = 0;
+  const shiftDay = (d, n) => { const [y, m, dd] = d.split("-").map(Number); return isoOf(new Date(y, m - 1, dd + n)); };
   for (const r of res) {
     if (r.status !== "fulfilled" || !r.value || !r.value.ok) continue;
     read++;
+    // la página del día trae todas las ligas: ahí solo nombres exactos (sin parecidos)
+    const strict = /results_/.test(r.value.path || "");
     for (const row of r.value.rows || []) {
-      const hk = keyOf(row.a), ak = keyOf(row.b);
+      const hk = keyOf(row.a, strict), ak = keyOf(row.b, strict);
       if (!hk || !ak || hk === ak || !row.date) continue;
       const id = `${row.date}|${hk}|${ak}`;
-      const g = idx.get(id);
+      // el mismo partido puede venir con un día de diferencia (hora UTC): se une, no se duplica
+      const g = idx.get(id) || idx.get(`${shiftDay(row.date, -1)}|${hk}|${ak}`) || idx.get(`${shiftDay(row.date, 1)}|${hk}|${ak}`);
       if (g) {
         if (!g.score && row.score) { g.score = row.score; if (row.ot) g.ot = row.ot; }
         g.time ||= row.time; g.odds ||= row.odds;
@@ -371,7 +397,9 @@ async function loadUpcoming(my) {
     const info = res.map((r, i) => `${urls[i].replace(/^.*\//, "")}: ${r.status === "fulfilled" && r.value ? (r.value.ok ? (r.value.rows || []).length + " filas" : "error " + (r.value.error || "")) : "sin respuesta"}`).join(" · ");
     const hints = [pr.ajax ? String(pr.ajax).slice(0, 500) : null, ...(pr.ajax ? [] : [...(pr.ids || []).slice(0, 3), ...(pr.snippets || []).slice(0, 3)].map((x) => String(x).slice(0, 160)))].filter(Boolean).join(" ‖ ");
     const samples = res.map((r, i) => r.status === "fulfilled" && r.value && r.value.sample && r.value.sample.length
-      ? `${urls[i].replace(/^.*\//, "").slice(0, 40)} (${r.value.bytes} bytes) → ${r.value.sample.flat().slice(0, 6).join(" ¦ ")}` : null).filter(Boolean).join(" ‖ ");
+      ? `${urls[i].replace(/^.*\//, "").slice(0, 40)} (${r.value.bytes} bytes) → ${r.value.sample.flat().slice(0, 6).join(" ¦ ")}`
+      : r.status === "fulfilled" && r.value && (r.value.rows || []).length
+        ? `${urls[i].replace(/^.*\//, "").slice(0, 30)} trae otros equipos: ${r.value.rows.slice(0, 3).map((x) => `${x.date} ${x.a} - ${x.b}`).join(" / ")}` : null).filter(Boolean).join(" ‖ ");
     (DATA.warnings ||= []).push(`Próximos partidos: AnnaBet no mostró partidos por jugar de esta liga. Fuentes: ${info}.${hints ? " Pistas: " + hints : ""}${samples ? " Muestra: " + samples : ""}`);
   }
   if (added && AUTO_DATE) $("#date").value = pickDefaultDate();
@@ -418,6 +446,7 @@ async function load(keepDate, retried) {
     if (my === reqId) { btn.disabled = false; btn.textContent = "Actualizar"; }
   }
   if (DATA && my === reqId) {
+    autoNight();
     if (!keepDate || !gameDates().includes($("#date").value)) $("#date").value = pickDefaultDate();
     render();
     loadUpcoming(my);
@@ -468,6 +497,7 @@ $("#prev").addEventListener("click", () => { AUTO_DATE = false; shift(-1); });
 $("#next").addEventListener("click", () => { AUTO_DATE = false; shift(1); });
 $("#q").addEventListener("input", () => DATA && render());
 $("#hot").addEventListener("change", () => DATA && render());
+$("#night").addEventListener("change", () => { NIGHT_SET = true; LS.set("futbol-radar:night", $("#night").checked ? "1" : "0"); DATA && render(); });
 $("#date").value = isoOf(new Date());
 loadLeagues().then(() => load(false));
 </script>
