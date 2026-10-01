@@ -407,7 +407,9 @@ const COUNTRY_ES = {
   iran: "Irán", india: "India", thailand: "Tailandia", vietnam: "Vietnam", indonesia: "Indonesia", malaysia: "Malasia",
   singapore: "Singapur", egypt: "Egipto", morocco: "Marruecos", algeria: "Argelia", tunisia: "Túnez",
   "south africa": "Sudáfrica", nigeria: "Nigeria", ghana: "Ghana", "new zealand": "Nueva Zelanda",
-  europe: "Europa", international: "Internacional", world: "Mundial", "south america": "Sudamérica",
+  europe: "Europa", "north america": "Norteamérica", asia: "Asia", africa: "África", oceania: "Oceanía",
+  philippines: "Filipinas", taiwan: "Taiwán", lebanon: "Líbano", jordan: "Jordania", "puerto rico": "Puerto Rico",
+  "dominican republic": "Rep. Dominicana", cuba: "Cuba", international: "Internacional", world: "Mundial", "south america": "Sudamérica",
 };
 const DEMONYM_ES = {
   english: "Inglaterra", scottish: "Escocia", welsh: "Gales", northern: "Irlanda del Norte", irish: "Irlanda",
@@ -435,18 +437,21 @@ function countryOfSlug(slug) {
   return DEMONYM_ES[(w[0] || "").toLowerCase()] || null;
 }
 function parseLeagues(html) {
-  const re = /href="[^"]*?(serie_(\d+)_([^"\/]+?))\.html"[^>]*>([\s\S]*?)<\/a>/gi;
+  // Solo enlaces <a> reales (no <link hreflang> de la cabecera), con texto corto
+  const re = /<a\b[^>]*?href="[^"]*?(serie_(\d+)_([^"\/]+?))\.html"[^>]*>((?:(?!<\/a>)[\s\S]){0,300}?)<\/a>/gi;
   const out = new Map();
   let m, last = 0, heading = null;
   while ((m = re.exec(html))) {
     // texto entre el enlace anterior y este = posible título de país del menú
-    const between = decode(html.slice(last, m.index).replace(/<a\b[\s\S]*?<\/a>/gi, " "));
+    const aStart = Math.max(last, html.lastIndexOf("<a", m.index));
+    const between = decode(html.slice(last, aStart).replace(/<a\b[\s\S]*?<\/a>/gi, " "));
     last = m.index + m[0].length;
     if (between) heading = between.length <= 40 && !/\d/.test(between) ? between : null;
     if (/,/.test(m[1])) continue; // enlaces de temporadas anteriores
     let id = decode(m[1]);
     try { id = decodeURIComponent(id); } catch {}
-    const txt = decode(m[4]) || m[3].replace(/_/g, " ");
+    let txt = decode(m[4]);
+    if (!txt || txt.length > 60 || /[#{};]/.test(txt)) txt = m[3].replace(/_/g, " ");
     const country = countryOfHeading(heading) || countryOfSlug(m[3]);
     // "Alemania: Regionalliga West" (sin repetir el país si el nombre ya lo trae)
     const label = country && !tkey(txt).includes(tkey(country)) ? `${country}: ${txt.replace(/^(English|German|Spanish|Italian|French|Finnish|Swedish|Norwegian|Danish|Dutch|Belgian|Portuguese|Turkish|Greek|Russian|Polish|Czech|Swiss|Austrian|Scottish|Irish|Brazilian|Argentinian|Mexican|American|Japanese|Korean|Chinese|Australian)\s+/i, "")}` : txt;
@@ -502,7 +507,7 @@ async function debugResponse(league) {
     const tables = parseTables(html);
     return json({
       url: u, status: r.status, bytes: html.length, tablas: tables.length,
-      muestra: tables.slice(0, 12).map((t, i) => ({
+      muestra: tables.slice(0, 30).map((t, i) => ({
         n: i, filas: t.rows.length,
         antes: decode(html.slice(Math.max(0, t.index - 300), t.index)).slice(-120),
         primeras: t.rows.slice(0, 4),
@@ -521,15 +526,118 @@ async function debugResponse(league) {
             proximos: g.filter((x) => !x.score).slice(0, 10).map((x) => `${x.date} ${x.time} ${x.home} - ${x.away}`) };
         } catch (e) { return { error: e.message }; }
       })(),
-      portadaProximos: await debugUpcoming(),
+      pestanaProximos: probeUpcoming(html),
+      candidatosProximos: upcomingCandidates(html, league),
     }, 200, { "Cache-Control": "no-store" });
   } catch (e) {
     return json({ url: u, error: e.message }, 200, { "Cache-Control": "no-store" });
   }
 }
 
+
+// ---------- partidos próximos ----------
+// La página de la liga de AnnaBet trae resultados, pero la pestaña "Upcoming Games" se carga aparte.
+// 1) Se buscan en el HTML de la liga los enlaces/direcciones que parezcan de próximos partidos.
+// 2) Además se usa la página del día de AnnaBet (results_0 = hoy, results_1 = mañana si existe).
+// La página pide cada fuente con ?part=rows&path=... y une los partidos de sus equipos.
+const ORIGIN = "https://annabet.com";
+function upcomingCandidates(html, league) {
+  const sid = (/^serie_(\d+)_/.exec(league) || [])[1] || "";
+  const found = new Set();
+  const re = /["'(=\s]((?:https?:\/\/(?:www\.)?annabet\.com)?\/?[\w\/.\-]*?(?:upcoming|coming|next_?games?|fixtures?|schedule|program)[\w\/.\-]*(?:\.php|\.html|\/)?(?:\?[\w=&%.,\-]*)?)["')\s]/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    let u = m[1].replace(/^https?:\/\/(?:www\.)?annabet\.com/i, "");
+    if (u.length < 6 || /\.(js|css|png|jpg|gif|svg)(\?|$)/i.test(u)) continue;
+    if (!/\.(php|html?)\b|\?/i.test(u)) continue; // solo páginas reales (no nombres de pestañas)
+    if (!u.startsWith("/")) u = new URL(u, SITE).pathname + (u.includes("?") ? u.slice(u.indexOf("?")) : "");
+    if (sid && /serie=|serie_|id=/.test(u) && !u.includes(sid)) continue; // de otra liga
+    found.add(u);
+  }
+  const base = new URL(SITE).pathname; // "/en/soccerstats/"
+  return [...found].slice(0, 4).concat([`${base}results_0.html`, `${base}results_1.html`]);
+}
+const cleanPath = (p) => (p && /^\/[\w\/.,?=&%\-]+$/.test(p) && !p.includes("..") ? p : null);
+
+// Filas genéricas de partido: dos equipos (texto) + hora o marcador
+function genericRows(html, dayOffset) {
+  const rows = [];
+  const tables = parseTables(html);
+  const baseDate = dayOffset != null ? relDay(dayOffset) : null;
+  for (const t of tables) {
+    let curDate = null, league = "";
+    for (const r of t.rows) {
+      const rowText = r.join(" | ");
+      if (/odds:|season|average|total|%/i.test(rowText) && !/\b\d{1,2}:\d{2}\b/.test(rowText)) continue;
+      const d = findDate(rowText);
+      const time = r.map((c) => /^\s*(?:\d{1,2}\.\d{1,2}\.?\s*)?(([01]?\d|2[0-3]):[0-5]\d)\s*$/.exec(c)).find(Boolean);
+      let score = null, ot = "";
+      for (const c of r) {
+        const sm = /^\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(ot|so|pen|ps|ap|et|aet)?\.?\s*(?:\(.*\))?\s*$/i.exec(c);
+        if (sm) { score = [+sm[1], +sm[2]]; ot = (sm[3] || "").toLowerCase(); break; }
+      }
+      const texts = r.map((c) => c.trim()).filter((c) => c.length >= 2 && c.length <= 45 && /[A-Za-zÀ-ÿ]{2}/.test(c) &&
+        !findDate(c) && !/^(ot|so|pen|ap|et|aet|ft|fin|final|live|postp\.?|canc\.?|\d+\.\s*)$/i.test(c));
+      let a = null, b = null;
+      if (texts.length >= 2) { [a, b] = texts; }
+      else if (texts.length === 1 && /\s[-–]\s/.test(texts[0])) { const p = texts[0].split(/\s[-–]\s/); if (p.length === 2) { a = p[0].trim(); b = p[1].trim(); } }
+      if (!a || !b) {
+        if (d) curDate = d;
+        else if (texts.length === 1 && !time && !score) league = texts[0];
+        continue;
+      }
+      if (!time && !score) continue;
+      let odds = r.map((c) => c.trim()).filter((c) => /^\d{1,2}\.\d{2}$/.test(c)).map(Number);
+      if (odds.length < 2) {
+        const oc = r.find((c) => /^\s*\d{1,2}\.\d{2}(\s*[\/|]\s*\d{1,2}\.\d{2}){1,2}\s*$/.test(c));
+        odds = oc ? oc.split(/[\/|]/).map((x) => Number(x.trim())) : [];
+      }
+      rows.push({
+        date: d || curDate || baseDate, time: time ? time[1] : "", a, b, score,
+        ...(ot ? { ot: /so|pen|ps/.test(ot) ? "SO" : "OT" } : {}),
+        odds: odds.length >= 2 ? odds.slice(0, 3) : null, league,
+      });
+    }
+  }
+  return rows;
+}
+
+async function rowsResponse(path) {
+  const p = cleanPath(path);
+  if (!p) return json({ ok: false, error: "ruta no válida" }, 400, { "Cache-Control": "no-store" });
+  const off = /results_(-?\d+)\.html/.exec(p);
+  try {
+    const r = await getHtmlPartial(ORIGIN + p, 8500);
+    const rows = genericRows(r.html, off ? +off[1] : null);
+    return json({ ok: true, path: p, rows, partial: r.partial }, 200, {
+      "Cache-Control": "public, max-age=0, must-revalidate",
+      "Netlify-CDN-Cache-Control": "public, durable, s-maxage=600, stale-while-revalidate=1800",
+      "Netlify-Vary": "query=part|path",
+    });
+  } catch (e) {
+    return json({ ok: false, path: p, error: e.message, rows: [] }, 200, { "Cache-Control": "no-store" });
+  }
+}
+
+// Diagnóstico de la pestaña "Upcoming Games": scripts y textos que la cargan
+function probeUpcoming(html) {
+  const out = { scripts: [], snippets: [], ids: [] };
+  for (const m of html.matchAll(/<script[^>]*\bsrc="([^"]+)"/gi)) out.scripts.push(m[1]);
+  for (const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+    const s = m[1];
+    for (const k of s.matchAll(/(upcoming|ajax|\.php|load\(|fetch\(|XMLHttp|\$\.get|\$\.post|getJSON)/gi)) {
+      out.snippets.push(s.slice(Math.max(0, k.index - 150), k.index + 200).replace(/\s+/g, " "));
+      if (out.snippets.length >= 12) break;
+    }
+    if (out.snippets.length >= 12) break;
+  }
+  for (const m of html.matchAll(/<[^>]+(?:upcoming|coming|next)[^>]*>/gi)) { out.ids.push(m[0].slice(0, 250)); if (out.ids.length >= 12) break; }
+  return out;
+}
+
 export default async (req) => {
   const url = new URL(req.url);
+  if (url.searchParams.get("part") === "rows") return rowsResponse(url.searchParams.get("path"));
   if (url.searchParams.get("part") === "leagues") return leaguesResponse();
   const askedLeague = url.searchParams.get("league");
   const league = cleanLeague(askedLeague) || "serie_1_English_Premier_League";
@@ -592,7 +700,7 @@ export default async (req) => {
   const title = decode((/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html) || [])[1] || "") || league.replace(/^serie_\d+_/, "").replace(/_/g, " ");
 
   return json(
-    { ok: true, league, title, updated: new Date().toISOString(), standings, games, warnings },
+    { ok: true, league, title, updated: new Date().toISOString(), standings, games, warnings, upcomingUrls: upcomingCandidates(html, league) },
     200,
     {
       "Cache-Control": "public, max-age=0, must-revalidate",
