@@ -352,7 +352,7 @@ function parseGames(tables, knownKeys, nameOf) {
       }
       // Fila que parece partido (fecha/hora + textos) pero con equipos no reconocidos → se reporta
       const intCells = r.filter((c) => /^\s*[+-]?\d+%?\s*$/.test(c)).length; // filas de tablas de posiciones
-      if (teamsInRow.length < 2 && intCells < 3 && (d || r.some((c) => /^\s*([01]?\d|2[0-3]):[0-5]\d\s*$/.test(c)))) {
+      if (teamsInRow.length < 2 && intCells < 3 && !/odds:|season/i.test(rowText) && (d || r.some((c) => /^\s*([01]?\d|2[0-3]):[0-5]\d\s*$/.test(c)))) {
         const words = r.filter((c) => /[A-Za-zÀ-ÿ]{3}/.test(c) && !findDate(c) && c.length <= 45);
         if (teamsInRow.length === 1 || words.length >= 2) misses.push(rowText.slice(0, 140));
       }
@@ -713,7 +713,7 @@ export default async (req) => {
   const title = decode((/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html) || [])[1] || "") || league.replace(/^serie_\d+_/, "").replace(/_/g, " ");
 
   return json(
-    { ok: true, league, title, updated: new Date().toISOString(), standings, games, warnings, upcomingUrls: upcomingCandidates(html, league) },
+    { ok: true, league, title, updated: new Date().toISOString(), standings, games, warnings, upcomingUrls: upcomingCandidates(html, league), upcomingProbe: probeUpcoming(html) },
     200,
     {
       "Cache-Control": "public, max-age=0, must-revalidate",
