@@ -365,7 +365,12 @@ async function loadUpcoming(my) {
   }
   const today = isoOf(new Date());
   const future = DATA.games.some((g) => g.date >= today && !g.score);
-  if (!future) (DATA.warnings ||= []).push(`Próximos partidos: AnnaBet no mostró partidos por jugar de esta liga (se revisaron ${read} de ${urls.length} fuentes). Si sabes que hay partido, mándame el diagnóstico.`);
+  if (!future) {
+    const pr = DATA.upcomingProbe || {};
+    const info = res.map((r, i) => `${urls[i].replace(/^.*\//, "")}: ${r.status === "fulfilled" && r.value ? (r.value.ok ? (r.value.rows || []).length + " filas" : "error " + (r.value.error || "")) : "sin respuesta"}`).join(" · ");
+    const hints = [...(pr.ids || []).slice(0, 3), ...(pr.snippets || []).slice(0, 3), ...(pr.scripts || []).slice(0, 4)].map((x) => String(x).slice(0, 160)).join(" ‖ ");
+    (DATA.warnings ||= []).push(`Próximos partidos: AnnaBet no mostró partidos por jugar de esta liga. Fuentes: ${info}.${hints ? " Pistas de la pestaña Upcoming: " + hints : ""}`);
+  }
   if (added && AUTO_DATE) $("#date").value = pickDefaultDate();
   render();
 }
