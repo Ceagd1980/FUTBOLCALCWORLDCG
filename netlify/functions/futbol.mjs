@@ -8,10 +8,15 @@
 const SITE = "https://annabet.com/en/soccerstats/"; // versión en inglés: fechas "Saturday 26. September 2026"
 // Lista de respaldo por si no se puede leer el menú de ligas (el menú real trae muchas más)
 const FALLBACK_LEAGUES = [
-  ["serie_1_English_Premier_League", "Inglaterra Premier League"],
-  ["serie_20_Scottish_Premier_League", "Escocia Premiership"],
-  ["serie_54_Russian_Premier_League", "Rusia Premier League"],
-  ["serie_220_Swiss_Challenge_League", "Suiza Challenge League"],
+  ["serie_8_German_Bundesliga", "Alemania: Bundesliga"], ["serie_56_German_2nd_Bundesliga", "Alemania: 2. Bundesliga"],
+  ["serie_145_German_3._Liga", "Alemania: 3. Liga"], ["serie_481_German_Regionalliga_Bayern", "Alemania: Regionalliga Bayern"],
+  ["serie_251_German_Regionalliga_North", "Alemania: Regionalliga Nord"], ["serie_253_German_Regionalliga_West", "Alemania: Regionalliga West"],
+  ["serie_633_German_Oberliga_Westfalen", "Alemania: Oberliga Westfalen"],
+  ["serie_1_English_Premier_League", "Inglaterra: Premier League"], ["serie_2_English_Championship", "Inglaterra: Championship"],
+  ["serie_13_English_League_One", "Inglaterra: League One"], ["serie_20_Scottish_Premier_League", "Escocia: Premiership"],
+  ["serie_7_Finnish_Veikkausliiga", "Finlandia: Veikkausliiga"], ["serie_35_Finnish_Ykkosliiga", "Finlandia: Ykkösliiga"],
+  ["serie_299_Israeli_Liga_Leumit", "Israel: Liga Leumit"], ["serie_54_Russian_Premier_League", "Rusia: Premier League"],
+  ["serie_220_Swiss_Challenge_League", "Suiza: Challenge League"],
 ];
 const MENU_PAGE = "serie_1_English_Premier_League"; // página de la que se lee el menú completo de ligas
 // Portadas con "Próximos partidos" de todas las ligas (se usa la primera que responda)
@@ -493,7 +498,8 @@ const cleanLeague = (s) => (s && /^serie_\d+_[^\/?#\s"<>]+$/.test(s) ? s : null)
 
 async function leaguesResponse() {
   try {
-    const html = await getHtml(`${SITE}${MENU_PAGE}.html`);
+    // el menú está al principio de la página: se lee por partes, hasta 8 s, con reintentos
+    const { html } = await getHtmlPartial(`${SITE}${MENU_PAGE}.html`, 8000);
     const list = parseLeagues(html);
     if (list.length < 5) throw new Error("menú de ligas no encontrado");
     return json({ ok: true, leagues: list, source: "annabet" }, 200, {
@@ -654,11 +660,8 @@ async function rowsResponse(path) {
     const sample = rows.length ? undefined : parseTables(r.html).filter((t) => t.rows.length > 1).slice(0, 2)
       .map((t) => t.rows.slice(0, 5).map((x) => x.join(" | ").slice(0, 160)));
     // incompleto o vacío: no se guarda en la caché (que el próximo intento vuelva a pedirlo)
-    const hdr = r.partial || !rows.length ? { "Cache-Control": "no-store" } : {
-      "Cache-Control": "public, max-age=0, must-revalidate",
-      "Netlify-CDN-Cache-Control": "public, durable, s-maxage=600, stale-while-revalidate=1800",
-      "Netlify-Vary": "query=part|path|league|debug",
-    };
+    // sin caché en Netlify: cada liga pide su propia pestaña y no se mezclan respuestas
+    const hdr = { "Cache-Control": "no-store" };
     return json({ ok: true, path: p, rows, partial: r.partial, bytes: r.html.length, sample }, 200, hdr);
   } catch (e) {
     return json({ ok: false, path: p, error: e.message, rows: [] }, 200, { "Cache-Control": "no-store" });
