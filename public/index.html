@@ -112,13 +112,13 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
   <h1>Radar Fútbol Mundial<small>Todas las ligas de AnnaBet: 1X2, PPG, goles totales y hándicap por partido</small></h1>
   <div class="controls">
     <label for="league" class="sr">Liga</label>
-    <select id="league"><option value="serie_1_English_Premier_League">Premier League</option></select>
+    <select id="league" autocomplete="off"><option value="serie_1_English_Premier_League">Premier League</option></select>
     <label for="q" class="sr">Buscar equipo</label>
     <input type="search" id="q" placeholder="Buscar equipo" autocomplete="off">
     <label class="chk" title="Muestra solo los partidos donde el local o la visita tiene más de 55% de probabilidad (1X2), ordenados de mayor a menor confianza"><input type="checkbox" id="hot"> 🔥 +55%</label>
     <button id="prev" class="nav" type="button" aria-label="Fecha anterior con partidos">◀</button>
     <label for="date" class="sr">Fecha</label>
-    <input type="date" id="date">
+    <input type="date" id="date" autocomplete="off">
     <button id="next" class="nav" type="button" aria-label="Fecha siguiente con partidos">▶</button>
     <button id="load">Actualizar</button>
   </div>
@@ -318,10 +318,63 @@ function render() {
   $("#warnlist").innerHTML = w.map((x) => `<li>${esc(x)}</li>`).join("");
 }
 
+const API = "/api/futbol";
+// ---------- partidos próximos (pestaña "Upcoming Games" y página del día de AnnaBet) ----------
+let AUTO_DATE = true; // la fecha se elige sola hasta que el usuario la cambie
+const tkc = (s) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+function teamIndex() {
+  const S = DATA.standings || {}, names = {};
+  for (const m of [S.all, S.home, S.away]) for (const [k, v] of Object.entries(m || {})) names[k] ||= v.team;
+  const keys = Object.keys(names);
+  const keyOf = (name) => {
+    const k = tkc(name);
+    if (!k) return null;
+    if (names[k]) return k;
+    if (k.length < 5) return null;
+    const hits = keys.filter((x) => x.length >= 5 && (x.includes(k) || k.includes(x)));
+    return hits.length === 1 ? hits[0] : null;
+  };
+  return { keyOf, nameOf: (k) => names[k] };
+}
+async function loadUpcoming(my) {
+  const urls = DATA?.upcomingUrls || [];
+  if (!urls.length) return;
+  const res = await Promise.allSettled(urls.map((p) =>
+    fetch(`${API}?part=rows&path=${encodeURIComponent(p)}`).then((r) => r.json())));
+  if (my !== reqId || !DATA) return;
+  const { keyOf, nameOf } = teamIndex();
+  const idx = new Map(DATA.games.map((g) => [`${g.date}|${g.homeKey}|${g.awayKey}`, g]));
+  let added = 0, read = 0;
+  for (const r of res) {
+    if (r.status !== "fulfilled" || !r.value || !r.value.ok) continue;
+    read++;
+    for (const row of r.value.rows || []) {
+      const hk = keyOf(row.a), ak = keyOf(row.b);
+      if (!hk || !ak || hk === ak || !row.date) continue;
+      const id = `${row.date}|${hk}|${ak}`;
+      const g = idx.get(id);
+      if (g) {
+        if (!g.score && row.score) { g.score = row.score; if (row.ot) g.ot = row.ot; }
+        g.time ||= row.time; g.odds ||= row.odds;
+        continue;
+      }
+      const ng = { date: row.date, time: row.time || "", home: nameOf(hk), away: nameOf(ak), homeKey: hk, awayKey: ak,
+        score: row.score || null, odds: row.odds || null, hc: null, ...(row.ot ? { ot: row.ot } : {}) };
+      DATA.games.push(ng); idx.set(id, ng); added++;
+    }
+  }
+  const today = isoOf(new Date());
+  const future = DATA.games.some((g) => g.date >= today && !g.score);
+  if (!future) (DATA.warnings ||= []).push(`Próximos partidos: AnnaBet no mostró partidos por jugar de esta liga (se revisaron ${read} de ${urls.length} fuentes). Si sabes que hay partido, mándame el diagnóstico.`);
+  if (added && AUTO_DATE) $("#date").value = pickDefaultDate();
+  render();
+}
+
 // ---------- carga ----------
 async function load(keepDate, retried) {
   const league = $("#league").value;
   const my = ++reqId;
+  if (!keepDate) AUTO_DATE = true;
   const btn = $("#load");
   btn.disabled = true; btn.textContent = "Cargando…";
   const lname = $("#league").selectedOptions[0]?.textContent || league;
@@ -359,6 +412,7 @@ async function load(keepDate, retried) {
   if (DATA && my === reqId) {
     if (!keepDate || !gameDates().includes($("#date").value)) $("#date").value = pickDefaultDate();
     render();
+    loadUpcoming(my);
   }
 }
 
@@ -398,9 +452,9 @@ $("#league").addEventListener("change", () => {
   LS.set("futbol-radar:league", sel.value); $("#q").value = ""; load(false);
 });
 $("#load").addEventListener("click", () => load(true));
-$("#date").addEventListener("change", () => DATA && render());
-$("#prev").addEventListener("click", () => shift(-1));
-$("#next").addEventListener("click", () => shift(1));
+$("#date").addEventListener("change", () => { AUTO_DATE = false; DATA && render(); });
+$("#prev").addEventListener("click", () => { AUTO_DATE = false; shift(-1); });
+$("#next").addEventListener("click", () => { AUTO_DATE = false; shift(1); });
 $("#q").addEventListener("input", () => DATA && render());
 $("#hot").addEventListener("change", () => DATA && render());
 $("#date").value = isoOf(new Date());
