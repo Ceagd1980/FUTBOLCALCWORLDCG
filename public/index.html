@@ -459,10 +459,14 @@ async function loadLeagues() {
   try {
     const r = await fetch("/api/futbol?part=leagues");
     const data = await r.json();
-    if (data.leagues && data.leagues.length) {
-      sel.innerHTML = data.leagues.map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join("");
-    }
-  } catch {}
+    let list = data.leagues || [];
+    // lista completa de AnnaBet: se guarda; si AnnaBet no respondió, se usa la última lista completa guardada
+    if (data.source === "annabet" && list.length > 20) LS.set("futbol-radar:leagues", JSON.stringify(list));
+    else { try { const old = JSON.parse(LS.get("futbol-radar:leagues") || "null"); if (old && old.length > list.length) list = old; } catch {} }
+    if (list.length) sel.innerHTML = list.map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join("");
+  } catch {
+    try { const old = JSON.parse(LS.get("futbol-radar:leagues") || "null"); if (old && old.length) sel.innerHTML = old.map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join(""); } catch {}
+  }
   if (![...sel.options].some((o) => o.value === saved)) sel.insertAdjacentHTML("afterbegin", `<option value="${esc(saved)}">${esc(saved.replace(/^serie_\d+_/, "").replace(/_/g, " "))}</option>`);
   sel.value = saved;
   addCustomOption();
