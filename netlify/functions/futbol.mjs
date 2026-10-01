@@ -39,7 +39,7 @@ function num(v) {
 // Lee la página por partes y se detiene al llegar al tiempo límite: si AnnaBet es lento,
 // se trabaja con lo que alcanzó a llegar (las tablas de posiciones y partidos están arriba)
 // en lugar de fallar todo. Netlify corta las funciones a los 10 s.
-async function getHtmlPartial(url, maxMs = 8000) {
+async function getHtmlPartial(url, maxMs = 8000, extraHeaders = {}) {
   const ctrl = new AbortController();
   const deadline = Date.now() + maxMs;
   const timer = setTimeout(() => ctrl.abort(), maxMs + 500);
@@ -47,7 +47,7 @@ async function getHtmlPartial(url, maxMs = 8000) {
     // si AnnaBet corta la conexión ("fetch failed") se reintenta mientras quede tiempo
     let r;
     for (let k = 0; ; k++) {
-      try { r = await fetch(url, { headers: HEADERS, signal: ctrl.signal, redirect: "follow" }); break; }
+      try { r = await fetch(url, { headers: { ...HEADERS, ...extraHeaders }, signal: ctrl.signal, redirect: "follow" }); break; }
       catch (e) { if (e.name === "AbortError" || k >= 2 || deadline - Date.now() < 2500) throw e; await sleep(400); }
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -583,14 +583,17 @@ function genericRows(html, dayOffset) {
       const rowText = r.join(" | ");
       if (/odds:|season|average|total|%/i.test(rowText) && !/\b\d{1,2}:\d{2}\b/.test(rowText)) continue;
       const d = findDate(rowText);
-      const time = r.map((c) => /^\s*(?:\d{1,2}\.\d{1,2}\.?\s*)?(([01]?\d|2[0-3]):[0-5]\d)\s*$/.exec(c)).find(Boolean);
+      const time = r.map((c) => /(?:^|\D)(([01]?\d|2[0-3]):[0-5]\d)(?!\d)/.exec(c)).find(Boolean);
+      // "04.10. 13:30" / "Sat 04.10 13:30" (día.mes junto a la hora)
+      let dm = null;
+      for (const c of r) { const x = /(\d{1,2})\.(\d{1,2})\.?\s+\d{1,2}:\d{2}/.exec(c); if (x) { dm = nearest(+x[1], +x[2]); break; } }
       let score = null, ot = "";
       for (const c of r) {
         const sm = /^\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\s*(ot|so|pen|ps|ap|et|aet)?\.?\s*(?:\(.*\))?\s*$/i.exec(c);
         if (sm) { score = [+sm[1], +sm[2]]; ot = (sm[3] || "").toLowerCase(); break; }
       }
       const texts = r.map((c) => c.trim()).filter((c) => c.length >= 2 && c.length <= 45 && /[A-Za-zÀ-ÿ]{2}/.test(c) &&
-        !findDate(c) && !/^(ot|so|pen|ap|et|aet|ft|fin|final|live|postp\.?|canc\.?|\d+\.\s*)$/i.test(c));
+        !findDate(c) && !/\d{1,2}:\d{2}/.test(c) && !/^(ot|so|pen|ap|et|aet|ft|fin|final|live|postp\.?|canc\.?|\d+\.\s*|mon|tue|wed|thu|fri|sat|sun|today|tomorrow)$/i.test(c));
       let a = null, b = null;
       if (texts.length >= 2) { [a, b] = texts; }
       else if (texts.length === 1 && /\s[-–]\s/.test(texts[0])) { const p = texts[0].split(/\s[-–]\s/); if (p.length === 2) { a = p[0].trim(); b = p[1].trim(); } }
@@ -599,14 +602,14 @@ function genericRows(html, dayOffset) {
         else if (texts.length === 1 && !time && !score) league = texts[0];
         continue;
       }
-      if (!time && !score) continue;
       let odds = r.map((c) => c.trim()).filter((c) => /^\d{1,2}\.\d{2}$/.test(c)).map(Number);
       if (odds.length < 2) {
         const oc = r.find((c) => /^\s*\d{1,2}\.\d{2}(\s*[\/|]\s*\d{1,2}\.\d{2}){1,2}\s*$/.test(c));
         odds = oc ? oc.split(/[\/|]/).map((x) => Number(x.trim())) : [];
       }
+      if (!time && !score && odds.length < 2) continue;
       rows.push({
-        date: d || curDate || baseDate, time: time ? time[1] : "", a, b, score,
+        date: dm || d || curDate || baseDate, time: time ? time[1] : "", a, b, score,
         ...(ot ? { ot: /so|pen|ps/.test(ot) ? "SO" : "OT" } : {}),
         odds: odds.length >= 2 ? odds.slice(0, 3) : null, league,
       });
@@ -620,9 +623,14 @@ async function rowsResponse(path) {
   if (!p) return json({ ok: false, error: "ruta no válida" }, 400, { "Cache-Control": "no-store" });
   const off = /results_(-?\d+)\.html/.exec(p);
   try {
-    const r = await getHtmlPartial(ORIGIN + p, 8500);
+    // las direcciones ajax_ de AnnaBet se piden como lo hace su página (jQuery .load)
+    const ajax = /ajax_/i.test(p) ? { "X-Requested-With": "XMLHttpRequest", Referer: SITE, Accept: "text/html, */*; q=0.01" } : {};
+    const r = await getHtmlPartial(ORIGIN + p, 8500, ajax);
     const rows = genericRows(r.html, off ? +off[1] : null);
-    return json({ ok: true, path: p, rows, partial: r.partial }, 200, {
+    // sin filas reconocidas: se devuelve una muestra de cómo viene la página para corregir el lector
+    const sample = rows.length ? undefined : parseTables(r.html).filter((t) => t.rows.length > 1).slice(0, 2)
+      .map((t) => t.rows.slice(0, 5).map((x) => x.join(" | ").slice(0, 160)));
+    return json({ ok: true, path: p, rows, partial: r.partial, bytes: r.html.length, sample }, 200, {
       "Cache-Control": "public, max-age=0, must-revalidate",
       "Netlify-CDN-Cache-Control": "public, durable, s-maxage=600, stale-while-revalidate=1800",
       "Netlify-Vary": "query=part|path",
@@ -636,6 +644,8 @@ async function rowsResponse(path) {
 function probeUpcoming(html) {
   const out = { scripts: [], snippets: [], ids: [] };
   for (const m of html.matchAll(/<script[^>]*\bsrc="([^"]+)"/gi)) out.scripts.push(m[1]);
+  const au = html.indexOf("ajax_upcoming");
+  if (au >= 0) out.ajax = html.slice(au, au + 500).replace(/\s+/g, " ");
   for (const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
     const s = m[1];
     for (const k of s.matchAll(/(upcoming|ajax|\.php|load\(|fetch\(|XMLHttp|\$\.get|\$\.post|getJSON)/gi)) {
