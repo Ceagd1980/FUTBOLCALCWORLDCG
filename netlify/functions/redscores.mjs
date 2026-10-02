@@ -923,14 +923,27 @@ export default async (req) => {
   const asked = url.searchParams.get("league");
   const league = cleanRsLeague(asked) || RS_DEFAULT;
   if (asked && !cleanRsLeague(asked)) return json({ ok: false, error: `Liga no válida: ${asked}` }, 400, { "Cache-Control": "no-store" });
-  const pageUrl = `${RS}${RS_LANG}/league/${league}`;
-
-  let html, partial = false;
-  try {
-    const r = await getHtmlPartial(pageUrl, 8500);
-    html = r.html; partial = r.partial;
-  } catch (e) {
-    return json({ ok: false, error: `No se pudo leer la liga en RedScores (${e.message}). Pulsa Actualizar para reintentar.`, league }, 502, { "Cache-Control": "no-store" });
+  // Se piden como un navegador normal; se prueba la dirección en español y la normal
+  const BROWSER = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    Referer: "https://redscores.com/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?1",
+  };
+  const urls = [`${RS}${RS_LANG}/league/${league}`, `${RS}/league/${league}`];
+  let pageUrl = urls[0], html, partial = false, lastErr = null;
+  for (const u of urls) {
+    try { const r = await getHtmlPartial(u, 4200, BROWSER); html = r.html; partial = r.partial; pageUrl = u; break; }
+    catch (e) { lastErr = e; }
+  }
+  if (!html) {
+    const blocked = /HTTP 403|HTTP 429|HTTP 503/.test(lastErr?.message || "");
+    return json({ ok: false, blocked, league,
+      error: blocked
+        ? `RedScores no deja leer sus páginas desde el servidor (${lastErr.message}): bloquea los accesos automáticos, igual que a tu hoja de Google Sheets. Usa AnnaBet para esta liga.`
+        : `No se pudo leer la liga en RedScores (${lastErr?.message}). Pulsa Actualizar para reintentar.` }, 502, { "Cache-Control": "no-store" });
   }
   const tables = parseTablesRaw(html);
   const standings = rsStandings(tables);
