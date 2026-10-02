@@ -116,11 +116,9 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
 </head>
 <body>
 <header>
-  <h1>Radar Fútbol Mundial<small>Ligas de AnnaBet y RedScores: 1X2, PPG, goles totales, hándicap y goleadores</small></h1>
+  <h1>Radar Fútbol Mundial<small>Todas las ligas de AnnaBet: 1X2, PPG, goles totales y hándicap por partido</small></h1>
   <div class="controls">
     <label for="league" class="sr">Liga</label>
-    <label for="source" class="sr">Fuente</label>
-    <select id="source" autocomplete="off" title="Página de donde se leen las tablas y los partidos"><option value="ab">AnnaBet</option><option value="rs">RedScores</option></select>
     <select id="league" autocomplete="off"><option value="serie_1_English_Premier_League">Premier League</option></select>
     <label for="q" class="sr">Buscar equipo</label>
     <input type="search" id="q" placeholder="Buscar equipo" autocomplete="off">
@@ -137,7 +135,7 @@ select{font:600 15px "Barlow Semi Condensed";background:var(--panel);color:var(-
 <details id="warnbox" hidden><summary>Avisos de datos</summary><ul id="warnlist"></ul></details>
 <main id="games"></main>
 <footer>
-  <p>Datos: AnnaBet.com o RedScores.com, según la fuente elegida (posiciones general, casa y fuera). ⚽ Goleadores (RedScores): goles del jugador ÷ partidos jugados de su equipo; se muestran los de 0.80 o más. El local se mide con su tabla general y su tabla en casa (LL); la visita con su tabla general y su tabla fuera (VV). GF = goles a favor por partido, GC = goles en contra por partido.</p>
+  <p>Datos: AnnaBet.com (posiciones general, casa y fuera). El local se mide con su tabla general y su tabla en casa (LL); la visita con su tabla general y su tabla fuera (VV). GF = goles a favor por partido, GC = goles en contra por partido.</p>
   <p>🔥 Confianza: probabilidad 1X2 del favorito (promedio entre General y LL/VV). Los partidos se ordenan de mayor a menor confianza; el filtro 🔥 +55% deja solo los que tienen un favorito con más de 55%.</p>
   <p>% ganador: ganados ÷ jugados. PPG: (ganados × 3 + empates × 1) ÷ jugados (de 0 a 3).</p>
   <p>1X2: Local = (ganados local + perdidos visita) ÷ partidos de ambos. Empate = (empates local + empates visita) ÷ partidos de ambos. Visita = (ganados visita + perdidos local) ÷ partidos de ambos.</p>
@@ -314,7 +312,8 @@ function render() {
   if (!all.length) {
     const next = ds.find((d) => d > day), prev = [...ds].reverse().find((d) => d < day);
     el.innerHTML = `<div class="empty">No hay partidos de ${esc(DATA.title)} el ${dayTitle(day)}.` +
-      (next ? ` Próxima fecha con partidos: <b>${dayTitle(next)}</b> (usa ▶).` : prev ? ` Última fecha con partidos: <b>${dayTitle(prev)}</b> (usa ◀).` : " AnnaBet no muestra partidos para esta liga ahora.") + `</div>`;
+      (next ? ` Próxima fecha con partidos: <b>${dayTitle(next)}</b> (usa ▶).` : prev ? ` Última fecha con partidos: <b>${dayTitle(prev)}</b> (usa ◀).` : " AnnaBet no muestra partidos para esta liga ahora.") +
+      (!(DATA.games || []).some((g) => !g.score) ? `<br><br><b>AnnaBet todavía no publicó próximos partidos de esta liga</b> (su pestaña "Próximos partidos" está vacía). Cuando los publique, aparecerán aquí solos.` : "") + `</div>`;
   } else if (!list.length) {
     el.innerHTML = onlyHot
       ? `<div class="empty">Ningún partido de este día tiene un favorito con más de 55%. Desmarca 🔥 +55% para ver todos.</div>`
@@ -353,7 +352,7 @@ function render() {
 }
 
 // ---------- fuente: AnnaBet o RedScores ----------
-let SRC = (() => { try { return localStorage.getItem("futbol-radar:src") === "rs" ? "rs" : "ab"; } catch { return "ab"; } })();
+let SRC = "ab"; // solo AnnaBet
 const P = () => (SRC === "rs" ? "futbol-radar:rs:" : "futbol-radar:");
 const apiBase = () => (SRC === "rs" ? "/api/redscores" : "/api/futbol");
 const DEFAULT_LEAGUE = () => (SRC === "rs" ? "england/premier-league/8" : "serie_1_English_Premier_League");
@@ -523,14 +522,6 @@ $("#league").addEventListener("change", () => {
   LS.set(P() + "league", sel.value); $("#q").value = ""; load(false);
 });
 // Si la liga elegida no es la que está cargada, se carga la nueva desde cero
-$("#source").value = SRC;
-$("#source").addEventListener("change", () => {
-  SRC = $("#source").value === "rs" ? "rs" : "ab";
-  LS.set("futbol-radar:src", SRC);
-  DATA = null; $("#q").value = "";
-  $("#games").innerHTML = `<div class="empty">Cargando ligas de ${SRC === "rs" ? "RedScores" : "AnnaBet"}…</div>`;
-  loadLeagues().then(() => load(false));
-});
 $("#load").addEventListener("click", () => load(!(DATA && DATA.league !== $("#league").value)));
 // Algunos navegadores no avisan "change" al elegir escribiendo: se revisa también al soltar la lista
 $("#league").addEventListener("blur", () => { const v = $("#league").value; if (v !== "__custom" && DATA && DATA.league !== v && !$("#load").disabled) { LS.set(P() + "league", v); $("#q").value = ""; load(false); } });
